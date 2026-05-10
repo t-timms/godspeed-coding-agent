@@ -64,11 +64,15 @@ dependencies = [
     "mcp>=1.27.0,<2.0",
     "python-multipart==0.0.27",
     "datasets>=4.8.5",
-    "pywinpty>=3.0.3",
-    "textual-serve>=1.1.3",
 ]
 
 [project.optional-dependencies]
+windows = [
+    "pywinpty>=3.0.3",    # PTY shell on Windows (ConPTY wrapper)
+]
+web = [
+    "textual-serve>=1.1.3",  # Browser-based TUI access
+]
 dev = [
     "pytest>=9.0.3,<10.0",
     "pytest-cov>=7.1.0,<8.0",
