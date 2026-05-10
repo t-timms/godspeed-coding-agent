@@ -2,11 +2,7 @@
 
 from __future__ import annotations
 
-import tempfile
-from pathlib import Path
 from unittest.mock import Mock
-
-import pytest
 
 
 class TestSplashScreen:
@@ -34,8 +30,9 @@ class TestSplashScreen:
         assert screen._status == "Step 2"
 
     def test_compose_yields_static(self):
-        from godspeed.tui.screens.splash import SplashScreen
         from textual.widgets import Static
+
+        from godspeed.tui.screens.splash import SplashScreen
 
         screen = SplashScreen()
         widgets = list(screen.compose())

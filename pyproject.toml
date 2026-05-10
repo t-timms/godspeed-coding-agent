@@ -113,6 +113,7 @@ line-length = 100
 target-version = "py311"
 extend-exclude = [
     "benchmarks/fixtures/easy-fix-syntax-01/app.py",  # intentional syntax error
+    "benchmarks/",
 ]
 
 [tool.ruff.lint]

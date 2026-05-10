@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 class TestShellWidget:
     """Verify shell widget creation and lifecycle."""

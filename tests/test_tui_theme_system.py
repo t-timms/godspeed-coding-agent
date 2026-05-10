@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from godspeed.tui.textual_app import _DARK, _LIGHT
 
 
@@ -170,12 +168,11 @@ class TestThemeDefaults:
 
     def test_toggle_theme_logic(self):
         """Verify theme toggle swaps between dark and light."""
-        from godspeed.tui.textual_app import GodspeedTextualApp
 
         app = Mock()
         app.theme = "godspeed-dark"
         result = []
-        setattr(app, 'theme', 'godspeed-dark')
+        app.theme = 'godspeed-dark'
 
         def simulate_toggle():
             app.theme = (
