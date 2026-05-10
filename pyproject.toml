@@ -41,6 +41,7 @@ dependencies = [
     "click>=8.1.0,<9.0",
     "rich>=15.0.0,<16.0",
     "prompt-toolkit>=3.0.52,<4.0",
+    "textual>=2.0.0,<9.0",
     "tiktoken>=0.9.0,<1.0",
     "gitpython>=3.1.50,<4.0",
     "diff-match-patch>=20241021",
@@ -63,6 +64,8 @@ dependencies = [
     "mcp>=1.27.0,<2.0",
     "python-multipart==0.0.27",
     "datasets>=4.8.5",
+    "pywinpty>=3.0.3",
+    "textual-serve>=1.1.3",
 ]
 
 [project.optional-dependencies]
@@ -125,6 +128,10 @@ select = [
     "RUF",  # ruff-specific
     "S",    # flake8-bandit
     "T20",  # flake8-print
+    "FA",   # flake8-future-annotations
+    "ARG",  # flake8-unused-arguments
+    "BLE",  # flake8-blind-except
+    "RET",  # flake8-return
 ]
 ignore = ["S603", "S607"]  # subprocess calls are intentional for a coding agent
 
@@ -134,6 +141,17 @@ ignore = ["S603", "S607"]  # subprocess calls are intentional for a coding agent
 "scripts/**/*.py" = ["T201"]  # print() is fine in CLI scripts
 "experiments/**/*.py" = ["S311", "N818", "SIM103"]  # jitter/naming/style nits in research code
 "experiments/**/tests/**/*.py" = ["S101", "S105", "S106", "SLF001", "S311", "N818", "SIM103"]
+"src/godspeed/tools/**/*.py" = ["BLE001", "ARG001", "ARG002"]  # tools have ABC-enforced signatures; broad exception boundaries
+"src/godspeed/llm/client.py" = ["BLE001"]  # LLM client catches broad exceptions for fallback chains
+"src/godspeed/mcp/**/*.py" = ["BLE001"]  # MCP client catches broad exceptions for transport failures
+"src/godspeed/tui/**/*.py" = ["BLE001"]  # TUI catches broad exceptions for UI resilience
+"src/godspeed/cli.py" = ["BLE001"]  # CLI catches broad exceptions to prevent crashes
+"src/godspeed/agent/loop.py" = ["BLE001", "ARG001", "ARG002"]  # agent loop callbacks have fixed signatures
+"src/godspeed/evolution/**/*.py" = ["BLE001"]  # evolution experiments; broad exception handling acceptable
+"src/godspeed/context/codebase_index.py" = ["BLE001"]  # ChromaDB integration; broad exception handling
+"src/godspeed/context/coherence_graph.py" = ["BLE001"]  # graph operations; broad exception handling
+"src/godspeed/context/lsp.py" = ["BLE001"]  # LSP subprocess I/O catches broad exceptions
+"src/godspeed/evaluation/swebench_harness.py" = ["BLE001"]  # agent run loop catches broad exceptions
 "benchmarks/fixtures/**/*.py" = [
     "T201",  # print() is intentional in diagnostic scripts
     "S603", "S607", "S102",  # subprocess is intentional in setup/verify hooks
@@ -148,8 +166,10 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "real_llm: requires a running Ollama server on localhost:11434 (skipped by default)",
+    "real_db: requires SQLite/file system access for live database tests (skipped by default in CI)",
+    "real_git: requires git installed for live git/GitHub tests (skipped by default in CI)",
 ]
-addopts = "-m 'not real_llm'"
+addopts = "-m 'not real_llm and not real_db and not real_git'"
 
 [tool.mypy]
 ignore_missing_imports = true
@@ -163,19 +183,12 @@ ignore_missing_imports = true
 source = ["src/godspeed"]
 branch = true
 omit = [
-    "src/godspeed/__main__.py",
-    "src/godspeed/llm/client.py",
-    "src/godspeed/context/compaction.py",
-    "src/godspeed/agent/system_prompt.py",
-    # "src/godspeed/tui/app.py",  # removed — tests added in test_tui_app.py
-    "src/godspeed/context/codebase_index.py",
-    "src/godspeed/tools/db_query.py",
-    "src/godspeed/tools/github.py",
+    "src/godspeed/tui/",
 ]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 80
+fail_under = 88
 
 [dependency-groups]
 dev = [

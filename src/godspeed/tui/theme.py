@@ -139,15 +139,17 @@ def icon_prompt(
     turn: int = 0,
     context_pct: float = 0.0,
     compact: bool = False,
+    model: str = "",
+    cost: float = 0.0,
 ) -> str:
     """Return the branded prompt string for prompt-toolkit (HTML format).
 
     State can be: '' (normal), 'plan' (plan mode), 'paused'.
     When *turn* > 0 and *compact* is False, the prompt includes the turn
-    number and context-window usage percentage.
+    number, context-window usage percentage, model, and cost.
     """
     color = ANSI_PRIMARY
-    icon = PROMPT_ICON
+    icon_c = PROMPT_ICON
     suffix = ""
     if state == "plan":
         suffix = " [plan]"
@@ -156,10 +158,22 @@ def icon_prompt(
         suffix = " [paused]"
         color = ANSI_WARNING
 
-    prompt = f"<b><{color}>{icon} {PROMPT_TEXT}{suffix}></{color}></b>"
+    prompt = f"<b><{color}>{icon_c} {PROMPT_TEXT}{suffix}></{color}></b>"
 
     if not compact and turn > 0:
         extras: list[str] = []
+
+        # Model short name
+        if model:
+            short = model.split("/", 1)[-1] if "/" in model else model
+            extras.append(f"<span color=\"{ANSI_NEUTRAL}\">{short}</span>")
+
+        # Cost
+        if cost > 0:
+            cost_str = f"${cost:.4f}" if cost >= 0.01 else f"${cost:.6f}"
+            extras.append(f"<span color=\"{ANSI_NEUTRAL}\">{cost_str}</span>")
+
+        # Turn + context
         extras.append(f"turn {turn}")
         if context_pct > 0:
             if context_pct >= 90:

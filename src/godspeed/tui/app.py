@@ -319,22 +319,22 @@ class TUIApp:
                 else 0.0
             )
 
-            def _prompt(_ctx: float = context_pct) -> str:
-                return session.prompt(
+            def _get_short_model() -> str:
+                m = self._llm_client.model
+                return m.split("/", 1)[-1] if "/" in m else m
+
+            try:
+                user_input = await session.prompt_async(
                     HTML(
                         icon_prompt(
                             self._get_prompt_state(),
                             turn=self._turn_count,
-                            context_pct=_ctx,
+                            context_pct=context_pct,
                             compact=is_compact_mode(),
+                            model=_get_short_model(),
+                            cost=self._llm_client.total_cost_usd,
                         )
                     ),
-                )
-
-            try:
-                user_input = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    _prompt,
                 )
             except KeyboardInterrupt:
                 _output.console.print(f"\n  [{DIM}]Interrupted. Type /quit to exit.[/{DIM}]")

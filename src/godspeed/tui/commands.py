@@ -91,6 +91,7 @@ class Commands:
         self.auto_commit: bool = False
         self.auto_commit_threshold: int = 5
         self.architect_mode: bool = False
+        self.whisper_mode: bool = False
 
         self._handlers: dict[str, CommandHandler] = {}
         self._handlers["/help"] = self._cmd_help
@@ -129,6 +130,26 @@ class Commands:
         self._handlers["/preferences"] = self._cmd_preferences
         self._handlers["/tools"] = self._cmd_tools
         self._handlers["/diff"] = self._cmd_diff
+        self._handlers["/whisper"] = self._cmd_whisper
+
+        # Short aliases for power-user productivity
+        self._handlers["/q"] = self._cmd_quit
+        self._handlers["/h"] = self._cmd_help
+        self._handlers["/m"] = self._cmd_model
+        self._handlers["/c"] = self._cmd_clear
+        self._handlers["/s"] = self._cmd_stats
+        self._handlers["/u"] = self._cmd_undo
+        self._handlers["/p"] = self._cmd_plan
+        self._handlers["/a"] = self._cmd_audit
+        self._handlers["/e"] = self._cmd_export
+        self._handlers["/b"] = self._cmd_budget
+        self._handlers["/x"] = self._cmd_extend
+        self._handlers["/ctx"] = self._cmd_context
+        self._handlers["/t"] = self._cmd_think
+        self._handlers["/r"] = self._cmd_review
+        self._handlers["/l"] = self._cmd_models
+        self._handlers["/cp"] = self._cmd_checkpoint
+        self._handlers["/rs"] = self._cmd_restore
 
     # External references — set after Commands init
     _task_store: Any | None = None
@@ -141,7 +162,10 @@ class Commands:
         self._handlers[name] = handler
 
     def dispatch(self, raw_input: str) -> CommandResult | None:
-        """Dispatch a slash command. Returns None if input is not a command."""
+        """Dispatch a slash command with fuzzy matching for typos.
+
+        Returns None if input is not a command.
+        """
         stripped = raw_input.strip()
         if not stripped.startswith("/"):
             return None
@@ -152,7 +176,14 @@ class Commands:
 
         handler = self._handlers.get(cmd)
         if handler is None:
-            format_error(f"Unknown command: {cmd}. Type /help for available commands.")
+            from difflib import get_close_matches
+
+            suggestions = get_close_matches(cmd, list(self._handlers), n=3, cutoff=0.5)
+            if suggestions:
+                names = ", ".join(suggestions)
+                format_info(f"Unknown: {cmd}. Did you mean: {names}?")
+            else:
+                format_error(f"Unknown command: {cmd}. Type /help for available commands.")
             return CommandResult(handled=True)
 
         return handler(args)
@@ -590,7 +621,7 @@ class Commands:
 
         return CommandResult(handled=True)
 
-    def _cmd_architect(self, args: str = "") -> CommandResult:
+    def _cmd_architect(self, _args: str = "") -> CommandResult:
         """Toggle architect mode — two-phase plan-then-execute."""
         self.architect_mode = not self.architect_mode
         if self.architect_mode:
@@ -600,6 +631,21 @@ class Commands:
             )
         else:
             format_info(f"Architect mode [{BOLD_PRIMARY}]OFF[/{BOLD_PRIMARY}]")
+        return CommandResult(handled=True)
+
+    def _cmd_whisper(self, _args: str = "") -> CommandResult:
+        """Toggle whisper mode — suppress tool output during agent runs."""
+        self.whisper_mode = not self.whisper_mode
+        if self.whisper_mode:
+            format_warning(
+                f"Whisper mode [{BOLD_PRIMARY}]ON[/{BOLD_PRIMARY}]"
+                " — tool output hidden during agent runs"
+            )
+        else:
+            format_success(
+                f"Whisper mode [{BOLD_PRIMARY}]OFF[/{BOLD_PRIMARY}]"
+                " — tool output visible"
+            )
         return CommandResult(handled=True)
 
     def _cmd_think(self, args: str = "") -> CommandResult:

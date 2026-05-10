@@ -776,8 +776,8 @@ def format_session_summary(
     tool_calls: int = 0,
     tool_errors: int = 0,
     tool_denied: int = 0,
-    model: str = "",
-    session_id: str = "",
+    model: str = "",  # noqa: ARG001
+    session_id: str = "",  # noqa: ARG001
 ) -> None:
     """Display minimal session summary on quit."""
     console.print()

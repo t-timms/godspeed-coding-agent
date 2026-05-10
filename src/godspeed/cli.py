@@ -207,22 +207,14 @@ def _ensure_llamacpp(console: Any | None = None) -> bool:
 async def _run_app(
     model: str,
     project_dir: Path,
-    verbose: bool,
+    _verbose: bool,
     audit_dir: Path | None,
     permission_mode: str | None = None,
     execution_mode: str = "tool",
 ) -> None:
     """Wire up all components and launch the Textual TUI."""
-    from godspeed.agent.conversation import Conversation
-    from godspeed.agent.system_prompt import build_system_prompt
-    from godspeed.audit.trail import AuditTrail
     from godspeed.config import GodspeedSettings
-    from godspeed.context.project_instructions import load_project_instructions
-    from godspeed.llm.client import LLMClient
-    from godspeed.security.permissions import PermissionEngine
-    from godspeed.tools.base import ToolContext
 
-    # Load config
     overrides: dict = {}
     if model:
         overrides["model"] = model
@@ -236,267 +228,22 @@ async def _run_app(
     effective_project_dir = project_dir.resolve()
     session_id = str(uuid4())
 
-    # Tools
     registry, risk_levels = _build_tool_registry()
 
-    # Task tracking
-    from godspeed.tools.tasks import TaskStore, TaskTool
+    from godspeed.tui.textual_app import GodspeedTextualApp
 
-    task_store = TaskStore()
-    task_tool = TaskTool(task_store)
-    registry.register(task_tool)
-    risk_levels[task_tool.name] = task_tool.risk_level
-
-    # Permission engine
-    permission_engine = PermissionEngine(
-        deny_patterns=settings.permissions.deny,
-        allow_patterns=settings.permissions.allow,
-        ask_patterns=settings.permissions.ask,
-        tool_risk_levels=risk_levels,
-    )
-
-    # Audit trail
-    audit_trail: AuditTrail | None = None
-    if settings.audit.enabled:
-        effective_audit_dir = audit_dir or (settings.global_dir / "audit")
-        audit_trail = AuditTrail(
-            log_dir=effective_audit_dir,
-            session_id=session_id,
-        )
-        audit_trail.record(
-            event_type="session_start",
-            detail={
-                "model": effective_model,
-                "project_dir": str(effective_project_dir),
-            },
-        )
-        # Purge expired audit logs on startup
-        audit_trail.cleanup_expired(settings.audit.retention_days)
-
-    # Conversation logger (training data collection)
-    conversation_logger = None
-    if settings.log_conversations:
-        from godspeed.training.conversation_logger import ConversationLogger
-
-        training_dir = settings.global_dir / "training"
-        conversation_logger = ConversationLogger(
-            session_id=session_id,
-            output_dir=training_dir,
-        )
-        logger.info("Conversation logging enabled output_dir=%s", training_dir)
-
-    # Memory — load preferences and corrections for system prompt injection
-    memory_hints = ""
-    user_memory = None
-    correction_tracker = None
-    session_memory = None
-    if settings.memory_enabled:
-        from godspeed.memory.corrections import CorrectionTracker
-        from godspeed.memory.session import SessionMemory
-        from godspeed.memory.user_memory import UserMemory
-
-        db_path = settings.global_dir / "memory.db"
-        user_memory = UserMemory(db_path=db_path)
-        correction_tracker = CorrectionTracker(user_memory)
-        session_memory = SessionMemory(db_path=db_path)
-        session_memory.start_session(session_id, effective_model, str(effective_project_dir))
-
-        prefs = user_memory.list_preferences()
-        corrections = correction_tracker.format_for_system_prompt(n=5)
-        if prefs or corrections:
-            parts: list[str] = []
-            if prefs:
-                parts.append("User preferences:")
-                for p in prefs:
-                    parts.append(f"- {p['key']}: {p['value']}")
-            if corrections:
-                parts.append(corrections)
-            memory_hints = "\n".join(parts)
-
-    # System prompt
-    project_instructions = load_project_instructions(
-        effective_project_dir,
-        settings.context.project_instructions,
-    )
-    system_prompt = build_system_prompt(
-        tools=registry.list_tools(),
-        project_instructions=project_instructions,
-        cwd=effective_project_dir,
-        execution_mode=settings.execution_mode,
-        memory_hints=memory_hints or None,
-    )
-
-    # Auto-start local inference servers if needed
-    if effective_model.lower().startswith("ollama"):
-        from godspeed.tui.output import console as rich_console
-
-        _ensure_ollama(console=rich_console)
-    elif effective_model.lower().startswith(("llamacpp/", "openai/")):
-        from godspeed.tui.output import console as rich_console
-
-        _ensure_llamacpp(console=rich_console)
-
-    # LLM client with model routing
-    from godspeed.llm.client import ModelRouter
-
-    router = ModelRouter(routing=settings.routing) if settings.routing else None
-    llm_client = LLMClient(
-        model=effective_model,
-        fallback_models=settings.fallback_models,
-        router=router,
-        thinking_budget=settings.thinking_budget,
-        max_cost_usd=settings.max_cost_usd,
-    )
-
-    # Tool context — constructed after the LLM client so tools that need an
-    # LLM (e.g. generate_tests) can invoke it via the context.
-    tool_context = ToolContext(
-        cwd=effective_project_dir,
+    app = GodspeedTextualApp(
+        settings=settings,
+        registry=registry,
+        risk_levels=risk_levels,
+        effective_model=effective_model,
+        effective_project_dir=effective_project_dir,
         session_id=session_id,
-        permissions=permission_engine,
-        audit=audit_trail,
-        llm_client=llm_client,  # type: ignore[arg-type]
+        permission_mode=permission_mode,
+        execution_mode=execution_mode or "tool",
+        audit_dir=audit_dir,
     )
-
-    # Kick off background codebase index if needed (non-blocking).
-    from godspeed.context.auto_index import maybe_start_auto_index
-
-    maybe_start_auto_index(effective_project_dir, settings.auto_index)
-
-    # Conversation
-    conversation = Conversation(
-        system_prompt=system_prompt,
-        model=effective_model,
-        max_tokens=settings.max_context_tokens,
-        compaction_threshold=settings.compaction_threshold,
-        conversation_logger=conversation_logger,
-    )
-
-    # MCP server discovery
-    if settings.mcp_servers:
-        from godspeed.mcp.client import MCPClient, MCPServerConfig
-        from godspeed.mcp.tool_adapter import adapt_mcp_tools
-
-        mcp_client = MCPClient()
-        if mcp_client.available:
-            for server_cfg in settings.mcp_servers:
-                config = MCPServerConfig(
-                    name=server_cfg.get("name", "unknown"),
-                    command=server_cfg.get("command", ""),
-                    args=server_cfg.get("args", []),
-                    env=server_cfg.get("env", {}),
-                    transport=server_cfg.get("transport", "stdio"),
-                    url=server_cfg.get("url"),
-                    headers=server_cfg.get("headers"),
-                )
-                try:
-                    definitions = await mcp_client.connect(config)
-                    for tool in adapt_mcp_tools(definitions, mcp_client):
-                        registry.register(tool)
-                        risk_levels[tool.name] = tool.risk_level
-                    logger.info("MCP server %s: %d tools", config.name, len(definitions))
-                except Exception as exc:
-                    logger.warning("MCP server %s failed: %s", config.name, exc)
-
-    # Sub-agent coordinator
-    from godspeed.agent.coordinator import AgentCoordinator, SpawnAgentTool
-    from godspeed.agent.retrieval_agent import RetrievalSubAgentTool
-
-    coordinator = AgentCoordinator(
-        llm_client=llm_client,
-        tool_registry=registry,
-        tool_context=tool_context,
-    )
-    spawn_tool = SpawnAgentTool(coordinator)
-    registry.register(spawn_tool)
-    risk_levels[spawn_tool.name] = spawn_tool.risk_level
-
-    retrieval_tool = RetrievalSubAgentTool(coordinator)
-    registry.register(retrieval_tool)
-    risk_levels[retrieval_tool.name] = retrieval_tool.risk_level
-
-    # Codebase index (optional — requires chromadb)
-    codebase_index = None
-    from godspeed.context.codebase_index import CodebaseIndex
-
-    codebase_index = CodebaseIndex(project_dir=effective_project_dir)
-    if codebase_index.is_available:
-        from godspeed.tools.code_search import CodeSearchTool
-
-        code_search_tool = CodeSearchTool(codebase_index)
-        registry.register(code_search_tool)
-        risk_levels[code_search_tool.name] = code_search_tool.risk_level
-
-        # Auto-reindex in background if stale
-        if codebase_index.needs_reindex():
-            logger.info("Codebase index is stale, rebuilding in background")
-            asyncio.get_event_loop().create_task(codebase_index.build_index_async())
-
-    # Discover skills with full skill system (evolution, hub, dream)
-    from godspeed.skills.loader import discover_skills
-
-    skill_dirs = [
-        settings.global_dir / "skills",
-        effective_project_dir / ".godspeed" / "skills",
-    ]
-    skills = discover_skills(skill_dirs)
-    skill_completions = [(f"/{s.trigger}", s.description) for s in skills]
-
-    from godspeed.skills.dream import SkillDream
-    from godspeed.skills.evolution import SkillEvolution
-    from godspeed.skills.loader import SkillHub
-
-    skill_evolution = SkillEvolution()
-    skill_hub = SkillHub()
-    skill_dream = SkillDream()
-    skills_dir = Path.home() / ".godspeed" / "skills"
-
-    # Hook executor
-    hook_executor = None
-    if settings.hooks:
-        from godspeed.hooks.config import HookDefinition
-        from godspeed.hooks.executor import HookExecutor
-
-        hook_defs = [HookDefinition(**h) for h in settings.hooks]
-        hook_executor = HookExecutor(
-            hooks=hook_defs,
-            cwd=effective_project_dir,
-            session_id=session_id,
-        )
-        hook_executor.run_pre_session()
-
-    # Launch classic TUI (prompt-toolkit)
-    from godspeed.tui.app import TUIApp
-
-    app = TUIApp(
-        llm_client=llm_client,
-        tool_registry=registry,
-        tool_context=tool_context,
-        conversation=conversation,
-        permission_engine=permission_engine,
-        audit_trail=audit_trail,
-        session_id=session_id,
-        skills=skills,
-        extra_completions=skill_completions,
-        hook_executor=hook_executor,
-        task_store=task_store,
-        codebase_index=codebase_index,
-        correction_tracker=correction_tracker,
-        session_memory=session_memory,
-        skill_evolution=skill_evolution,
-        skill_hub=skill_hub,
-        skill_dream=skill_dream,
-        skills_dir=skills_dir,
-    )
-    await app.run()
-
-    # Close conversation logger
-    if conversation_logger is not None:
-        conversation_logger.close()
-
-    # Post-session hooks
-    if hook_executor is not None:
-        hook_executor.run_post_session()
+    await app.run_async()
 
 
 @click.group(invoke_without_command=True)
@@ -787,6 +534,54 @@ def serve(config: Path | None) -> None:
     sys.exit(exit_code)
 
 
+@main.command("web")
+@click.option(
+    "--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)."
+)
+@click.option(
+    "--port", default=8000, type=int, help="Port to listen on (default: 8000)."
+)
+@click.option(
+    "--model", "-m", default="", help="Model override."
+)
+@click.option(
+    "--project-dir", "-d",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path("."),
+    help="Project directory.",
+)
+def web_serve(host: str, port: int, model: str, project_dir: Path) -> None:
+    """Run Godspeed TUI as a web app accessible from any browser."""
+    import os
+
+    from rich.console import Console as RichConsole
+
+    from godspeed.tui.theme import BOLD_PRIMARY, DIM
+
+    c = RichConsole()
+    c.print()
+    c.print(f"  [{BOLD_PRIMARY}]Godspeed Web[/{BOLD_PRIMARY}]")
+    c.print(f"  [{DIM}]http://{host}:{port}[/{DIM}]")
+    c.print(f"  [{DIM}]Press Ctrl+C to stop[/{DIM}]")
+    c.print()
+
+    os.environ["TEXTUAL_DRIVER"] = "web"
+    os.environ["TEXTUAL_WEB_HOST"] = host
+    os.environ["TEXTUAL_WEB_PORT"] = str(port)
+
+    try:
+        asyncio.run(
+            _run_app(
+                model,
+                project_dir,
+                _verbose=False,
+                audit_dir=None,
+            )
+        )
+    except KeyboardInterrupt:
+        c.print(f"\n  [{DIM}]Server stopped.[/{DIM}]")
+
+
 def _resolve_task_input(task_arg: str, prompt_file: Path | None) -> str:
     """Resolve the task text from the available sources (in precedence order).
 
@@ -913,6 +708,7 @@ async def _headless_run(
         router=router,
         thinking_budget=settings.thinking_budget,
         max_cost_usd=settings.max_cost_usd,
+        reasoning_effort=settings.reasoning_effort,
     )
 
     # Tool context — constructed after the LLM client so tools that need an
@@ -950,7 +746,7 @@ async def _headless_run(
     )
 
     # Callbacks — write to stderr for tool activity, keep stdout for result
-    def on_tool_call(name: str, args: dict) -> None:
+    def on_tool_call(name: str, args: dict) -> None:  # noqa: ARG001
         logger.info("Tool call: %s", name)
         if not json_output:
             sys.stderr.write(f"[tool] {name}\n")
@@ -1514,3 +1310,353 @@ def export_training(
         c.print(f"  [{ERROR}]Errors: {len(stats.errors)}[/{ERROR}]")
         for err in stats.errors[:5]:
             c.print(f"    {err}")
+
+
+# ── SWE-bench CLI group ────────────────────────────────────────────────
+
+
+@main.group()
+def swebench() -> None:
+    """SWE-bench evaluation — run Godspeed on SWE-bench Lite and produce benchmark scores."""
+
+
+@swebench.command("run")
+@click.option(
+    "--model", "-m",
+    required=True,
+    help="Model to evaluate (e.g. deepseek/deepseek-v4-pro).",
+)
+@click.option(
+    "--run-id",
+    default="",
+    help="Identifier for this run (auto-generated if empty).",
+)
+@click.option(
+    "--max-instances", "-n",
+    type=int,
+    default=300,
+    help="Max number of instances to evaluate (default: 300 — full SWE-bench Lite).",
+)
+@click.option(
+    "--max-workers", "-w",
+    type=int,
+    default=4,
+    help="Max concurrent agent runs (default: 4).",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=900,
+    help="Wall-clock timeout per instance in seconds (default: 900 = 15min).",
+)
+@click.option(
+    "--agent-max-iterations",
+    type=int,
+    default=30,
+    help="Max agent loop iterations per instance (default: 30).",
+)
+@click.option(
+    "--tool-set",
+    type=click.Choice(["swebench", "full", "local", "web"]),
+    default="swebench",
+    help="Tool set: swebench (12 tools), full (all 30+), local, web.",
+)
+@click.option(
+    "--simple",
+    "is_simple",
+    is_flag=True,
+    help="Simple mode: swebench tool set only (bash-heavy, matching mini-swe-agent v2).",
+)
+@click.option(
+    "--complex",
+    "is_complex",
+    is_flag=True,
+    help="Complex mode: full 30-tool Godspeed for A/B comparison.",
+)
+@click.option(
+    "--competition/--no-competition",
+    default=True,
+    help="Strip non-essential features for benchmark runs (default: on).",
+)
+@click.option(
+    "--docker/--no-docker",
+    default=False,
+    help="Run each instance in a Docker container (default: off).",
+)
+@click.option(
+    "--skip-existing/--no-skip",
+    default=True,
+    help="Skip instances with existing predictions (default: on).",
+)
+@click.option(
+    "--evaluate/--no-evaluate",
+    default=False,
+    help="Run Docker-based test evaluation after predictions (default: off).",
+)
+@click.option(
+    "--instance-ids",
+    default=None,
+    help="Comma-separated instance IDs to run (overrides --max-instances).",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Output directory for predictions (default: experiments/swebench_lite/predictions/).",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
+@click.pass_context
+def swebench_run(
+    ctx: click.Context,
+    model: str,
+    run_id: str,
+    max_instances: int,
+    max_workers: int,
+    timeout: int,
+    agent_max_iterations: int,
+    tool_set: str,
+    is_simple: bool,
+    is_complex: bool,
+    competition: bool,
+    docker: bool,
+    skip_existing: bool,
+    evaluate: bool,
+    instance_ids: str | None,
+    output_dir: Path | None,
+    verbose: bool,
+) -> None:
+    """Run Godspeed on SWE-bench Lite and produce predictions.
+
+    Runs the Godspeed agent on each SWE-bench Lite instance, captures the
+    resulting git diff as a patch, and saves predictions in the standard
+    SWE-bench JSONL format.
+
+    Examples:
+        godspeed swebench run -m deepseek/deepseek-v4-pro
+        godspeed swebench run -m claude-sonnet-4-20250514 -n 10 -w 2 --simple
+        godspeed swebench run -m gpt-4o --max-instances 50 --docker --evaluate
+    """
+    from godspeed._bootstrap import _load_env_files
+    from godspeed.evaluation.swebench_harness import run_swebench_evaluation
+
+    _setup_logging(verbose)
+
+    # Auto-load env files so API keys reach LiteLLM
+    project_dir = Path(ctx.obj.get("project_dir", ".")) if ctx.obj else Path(".")
+    _load_env_files(project_dir=project_dir)
+
+    # Resolve tool_set from flags
+    if is_simple:
+        tool_set = "swebench"
+    elif is_complex:
+        tool_set = "full"
+
+    # Parse instance IDs
+    ids_list: list[str] = []
+    if instance_ids:
+        ids_list = [i.strip() for i in instance_ids.split(",") if i.strip()]
+
+    try:
+        asyncio.run(
+            run_swebench_evaluation(
+                model=model,
+                run_id=run_id,
+                max_instances=max_instances,
+                max_workers=max_workers,
+                timeout_per_instance=timeout,
+                agent_max_iterations=agent_max_iterations,
+                tool_set=tool_set,
+                competition_mode=competition,
+                use_docker=docker,
+                skip_existing=skip_existing,
+                evaluate_after=evaluate,
+                instance_ids=ids_list or None,
+                output_dir=output_dir,
+            )
+        )
+    except KeyboardInterrupt:
+        from rich.console import Console as RichConsole
+
+        from godspeed.tui.theme import WARNING
+
+        RichConsole().print(
+            f"[{WARNING}]Evaluation interrupted. "
+            f"Predictions saved up to this point.[/{WARNING}]"
+        )
+        sys.exit(130)
+    except ImportError as exc:
+        from rich.console import Console as RichConsole
+
+        from godspeed.tui.theme import ERROR
+
+        RichConsole().print(f"[{ERROR}]Import error: {exc}[/{ERROR}]")
+        RichConsole().print("  Ensure 'datasets' is installed: pip install datasets")
+        sys.exit(1)
+
+
+@swebench.command("list-instances")
+@click.option(
+    "--max", "-n",
+    "max_count",
+    type=int,
+    default=20,
+    help="Max instances to display (default: 20).",
+)
+@click.option(
+    "--repo",
+    default=None,
+    help="Filter by repo (e.g. 'django/django').",
+)
+def swebench_list_instances(max_count: int, repo: str | None) -> None:
+    """List available SWE-bench Lite instances."""
+    from rich.console import Console as RichConsole
+    from rich.table import Table
+
+    from godspeed.evaluation.swebench_harness import load_swebench_lite
+    from godspeed.tui.theme import BOLD_PRIMARY, NEUTRAL, TABLE_BORDER
+
+    c = RichConsole()
+
+    try:
+        instances = load_swebench_lite(max_instances=max_count * 2)
+    except ImportError as exc:
+        c.print(f"[red]{exc}[/red]")
+        return
+
+    if repo:
+        instances = [i for i in instances if i.repo == repo]
+
+    instances = instances[:max_count]
+
+    c.print(
+        f"\n  [{BOLD_PRIMARY}]SWE-bench Lite Instances[/{BOLD_PRIMARY}]"
+        f" ({len(instances)} shown)\n"
+    )
+
+    table = Table(border_style=TABLE_BORDER, expand=False)
+    table.add_column("Instance ID", style=BOLD_PRIMARY)
+    table.add_column("Repo", style=NEUTRAL)
+    table.add_column("Base Commit")
+
+    for inst in instances:
+        table.add_row(inst.instance_id, inst.repo, inst.base_commit[:8])
+
+    c.print(table)
+    c.print()
+    c.print(f"  [{NEUTRAL}]Total: {len(instances)} instances[/{NEUTRAL}]")
+
+
+@swebench.command("eval")
+@click.argument("predictions_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--max-workers", "-w",
+    type=int,
+    default=2,
+    help="Max concurrent evaluation containers (default: 2).",
+)
+@click.option(
+    "--timeout",
+    type=int,
+    default=600,
+    help="Timeout per evaluation container in seconds (default: 600).",
+)
+def swebench_eval(
+    predictions_file: Path,
+    max_workers: int,
+    timeout: int,
+) -> None:
+    """Evaluate predictions against SWE-bench tests using Docker.
+
+    Reads predictions from a JSONL file, applies each patch in a Docker
+    container, runs the test suite, and reports resolved rates.
+
+    PREDICTIONS_FILE: Path to the predictions JSONL file from `godspeed swebench run`.
+    """
+    import tempfile
+
+    from rich.console import Console as RichConsole
+
+    from godspeed.evaluation.swebench_harness import (
+        SWEBenchInstance,
+        SWEBenchPrediction,
+        _docker_available,
+        load_predictions,
+        load_swebench_lite,
+    )
+    from godspeed.tui.theme import ERROR, SUCCESS, WARNING
+
+    c = RichConsole()
+
+    if not _docker_available():
+        c.print(f"[{ERROR}]Docker is not available. Install Docker Desktop.[/{ERROR}]")
+        sys.exit(1)
+
+    predictions = load_predictions(predictions_file)
+    if not predictions:
+        c.print(f"[{ERROR}]No predictions found in {predictions_file}[/{ERROR}]")
+        sys.exit(1)
+
+    c.print(f"  Evaluating {len(predictions)} predictions...")
+
+    # Load instances for repo/base_commit info
+    all_instances = load_swebench_lite()
+    instance_map: dict[str, SWEBenchInstance] = {
+        i.instance_id: i for i in all_instances
+    }
+
+    async def _eval_predictions_async() -> None:
+        from godspeed.evaluation.swebench_harness import _run_tests_in_docker
+
+        semaphore = asyncio.Semaphore(max_workers)
+        resolved = 0
+        total = 0
+
+        async def _eval_one(pred: SWEBenchPrediction) -> bool:
+            nonlocal total
+            async with semaphore:
+                total += 1
+                inst = instance_map.get(pred.instance_id)
+                if inst is None:
+                    c.print(
+                        f"  [{WARNING}]Instance {pred.instance_id}"
+                        f" not found in dataset[/{WARNING}]"
+                    )
+                    return False
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    work_dir = Path(tmpdir)
+                    is_resolved, report = _run_tests_in_docker(
+                        inst, pred.model_patch, work_dir, timeout=timeout
+                    )
+                    status = (
+                        f"[{SUCCESS}]RESOLVED[/{SUCCESS}]"
+                        if is_resolved
+                        else "[red]FAILED[/red]"
+                    )
+                    c.print(f"  [{total}/{len(predictions)}] {pred.instance_id}: {status}")
+                    if report.get("total"):
+                        c.print(
+                            f"    Tests: {report.get('passed', 0)}"
+                            f"/{report.get('total', 0)} passed"
+                        )
+                    return is_resolved
+
+        results = await asyncio.gather(
+            *[_eval_one(p) for p in predictions],
+            return_exceptions=True,
+        )
+
+        for r in results:
+            if r is True:
+                resolved += 1
+
+        if total > 0:
+            rate = resolved / total * 100
+            c.print()
+            c.print(f"  [{SUCCESS}]Resolved: {resolved}/{total} ({rate:.1f}%)[/{SUCCESS}]")
+
+    try:
+        asyncio.run(_eval_predictions_async())
+    except KeyboardInterrupt:
+        c.print(f"\n[{WARNING}]Evaluation interrupted.[/{WARNING}]")
+        sys.exit(130)
