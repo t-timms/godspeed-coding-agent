@@ -106,3 +106,4 @@ experiments/*/
 
 # Session logs (from Windows bash) that sometimes land in the repo tree
 experiments/swebench_lite/*.log
+audit/
