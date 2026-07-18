@@ -35,9 +35,12 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "litellm>=1.83.11,<2.0",
+    # litellm < 1.84.0 has CVE-2026-49468 (auth bypass via Host header injection).
+    # Cap < 1.92: 1.92.0 adds a Rust extension with no Windows wheel (maturin
+    # source build fails); 1.91.3 is the last pure-Python release.
+    "litellm>=1.84.0,<1.92",
     "pydantic>=2.12.5,<3.0",
-    "pydantic-settings>=2.14.0,<3.0",
+    "pydantic-settings>=2.14.2,<3.0",
     "click>=8.1.0,<9.0",
     "rich>=15.0.0,<16.0",
     "prompt-toolkit>=3.0.52,<4.0",
@@ -50,11 +53,9 @@ dependencies = [
     # Cross-platform; ~800KB. Lighter than keeping it as an optional extra
     # because the tool is registered by default and CI needs it to test.
     "psutil>=7.2.2,<8.0",
-    # Transitive pin-up: aiohttp is pulled in via litellm; versions < 3.13.4
-    # have 10 CVEs (CVE-2026-34513..34525, CVE-2026-22815). litellm >= 1.83.11
-    # pins aiohttp <= 3.13.4, so we set the floor to 3.13.4 as the best match.
-    # Bump when litellm relaxes its aiohttp bound.
-    "aiohttp>=3.13.4",
+    # Transitive pin-up: aiohttp is pulled in via litellm; versions < 3.14.1
+    # carry known CVEs (request-smuggling / parser series).
+    "aiohttp>=3.14.1",
     # urllib3 decompression-bomb CVE in streaming API. Bump past affected versions.
     "urllib3>=2.6.4",
     # python-dotenv CVE-2026-28684 is known (fix in 1.2.2) but litellm pins
@@ -63,8 +64,9 @@ dependencies = [
     # remove the suppression when litellm relaxes its bound.
     "yfinance>=1.3.0",
     "readability-lxml>=0.8.4.1",
-    "mcp>=1.27.0,<2.0",
-    "python-multipart==0.0.27",
+    "mcp>=1.28.1,<2.0",
+    # python-multipart < 0.0.31 has DoS CVEs in multipart boundary parsing.
+    "python-multipart>=0.0.31,<0.1",
     "datasets>=4.8.5",
     "pywinpty>=3.0.3; sys_platform == 'win32'",
     "textual-serve>=1.1.3",
