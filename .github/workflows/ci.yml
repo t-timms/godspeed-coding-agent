@@ -14,7 +14,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
       - run: uv run ruff check .
@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
       - run: uv run mypy src/ --ignore-missing-imports --disable-error-code arg-type --disable-error-code assignment --disable-error-code misc --disable-error-code list-item --disable-error-code type-abstract --disable-error-code type-arg --disable-error-code unused-ignore --disable-error-code override --disable-error-code call-arg --disable-error-code var-annotated --disable-error-code attr-defined --disable-error-code no-any-return --disable-error-code union-attr --disable-error-code return-value --disable-error-code no-redef
@@ -33,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
       # PYSEC-2026-311: chromadb pre-auth code injection — no patched release
@@ -50,7 +50,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
