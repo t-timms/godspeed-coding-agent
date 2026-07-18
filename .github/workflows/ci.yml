@@ -36,7 +36,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7
       - run: uv sync --all-extras
-      - run: uv run pip-audit --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219 --ignore-vuln GHSA-mv93-w799-cj2w
+      # PYSEC-2026-311: chromadb pre-auth code injection — no patched release
+      # exists (all <= 1.5.9 affected). Tolerable here: chromadb is embedded-only
+      # (local PersistentClient behind the optional [index] extra); the vulnerable
+      # server API is never run. Drop this ignore when upstream ships a fix.
+      - run: uv run pip-audit --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219 --ignore-vuln GHSA-mv93-w799-cj2w --ignore-vuln PYSEC-2026-311
       - run: uv run bandit -r src/ -ll -s B310,B104,B602,B404,B603,B607,B608,B101,B303,B301,B311,B615
 
   test:
