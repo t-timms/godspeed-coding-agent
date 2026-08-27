@@ -17,7 +17,9 @@ type-check:
 	ty check src/ || mypy src/ --ignore-missing-imports
 
 security:
-	pip-audit --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
+	# chromadb CVE-2026-45830/31/33 have no patched release yet (<= 1.5.9 all
+	# affected); embedded-only usage makes them tolerable. Drop when fixed.
+	pip-audit --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219 --ignore-vuln CVE-2026-45830 --ignore-vuln CVE-2026-45831 --ignore-vuln CVE-2026-45833
 	bandit -r src/ -c pyproject.toml -ll || bandit -r src/ -ll
 
 test:
