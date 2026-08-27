@@ -46,16 +46,16 @@ dependencies = [
     "prompt-toolkit>=3.0.52,<4.0",
     "textual>=2.0.0,<9.0",
     "tiktoken>=0.9.0,<1.0",
-    "gitpython>=3.1.50,<4.0",
+    "gitpython>=3.1.58,<4.0",
     "diff-match-patch>=20241021",
     "pyyaml>=6.0.3,<7.0",
     # System introspection for SystemOptimizerTool (inspect/recommend modes).
     # Cross-platform; ~800KB. Lighter than keeping it as an optional extra
     # because the tool is registered by default and CI needs it to test.
     "psutil>=7.2.2,<8.0",
-    # Transitive pin-up: aiohttp is pulled in via litellm; versions < 3.14.1
-    # carry known CVEs (request-smuggling / parser series).
-    "aiohttp>=3.14.1",
+    # Transitive pin-up: aiohttp is pulled in via litellm; versions < 3.14.3
+    # carry known CVEs (request-smuggling / WebSocket OOB-read series).
+    "aiohttp>=3.14.3",
     # urllib3 decompression-bomb CVE in streaming API. Bump past affected versions.
     "urllib3>=2.6.4",
     # python-dotenv CVE-2026-28684 is known (fix in 1.2.2) but litellm pins
@@ -70,7 +70,7 @@ dependencies = [
     "mcp>=1.28.1,<2.0",
     # python-multipart < 0.0.31 has DoS CVEs in multipart boundary parsing.
     "python-multipart>=0.0.31,<0.1",
-    "datasets>=4.8.5",
+    "datasets>=5.0.1",
     "pywinpty>=3.0.3; sys_platform == 'win32'",
     "textual-serve>=1.1.3",
 ]
