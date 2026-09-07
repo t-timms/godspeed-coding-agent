@@ -1,4 +1,4 @@
-# CLAUDE.md — Godspeed Coding Agent
+﻿# GODSPEED.md — Godspeed Coding Agent
 
 ## Project
 

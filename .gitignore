@@ -106,3 +106,7 @@ experiments/*/
 
 # Session logs (from Windows bash) that sometimes land in the repo tree
 experiments/swebench_lite/*.log
+
+# Agent-local instruction files (published copy lives in GODSPEED.md)
+CLAUDE.md
+.claude/
