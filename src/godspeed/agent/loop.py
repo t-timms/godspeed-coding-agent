@@ -1444,9 +1444,8 @@ def _acceptance_summary(tool_context: ToolContext | None) -> str | None:
 
 def _tasks_open(task_store: Any | None, tool_context: ToolContext | None) -> bool:
     """Return True when open tasks or failing acceptance items remain."""
-    if task_store is not None:
-        if any(t.status != "completed" for t in task_store.list_all()):
-            return True
+    if task_store is not None and any(t.status != "completed" for t in task_store.list_all()):
+        return True
     if tool_context is None:
         return False
     from godspeed.tools.acceptance import (
