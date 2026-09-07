@@ -172,12 +172,12 @@ class TestCompactIfNeeded:
 
 
 class TestGraduatedCompactor:
-    """Test the 5-stage graduated compaction ladder."""
+    """Test the graduated compaction ladder (4 deterministic + 1 async)."""
 
     def test_stages_defined(self) -> None:
-        assert len(COMPACTION_STAGES) == 5
+        assert len(COMPACTION_STAGES) == 4
         assert COMPACTION_STAGES[0].name == "budget_reduction"
-        assert COMPACTION_STAGES[4].name == "auto_compact"
+        assert COMPACTION_STAGES[3].name == "context_collapse"
 
     def test_get_stage_for_context(self) -> None:
         compactor = GraduatedCompactor()

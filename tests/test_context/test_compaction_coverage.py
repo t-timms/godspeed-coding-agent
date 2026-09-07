@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ from godspeed.context.compaction import (
     COMPACTION_PROMPT_LARGE,
     COMPACTION_PROMPT_SMALL,
     COMPACTION_STAGES,
+    EMERGENCY_STAGE_IDX,
     CompactionContext,
     CompactionResult,
     GraduatedCompactor,
@@ -63,7 +65,7 @@ class TestDropVerboseToolOutputs:
 
 
 class TestRemoveLowSignalTurns:
-    """Cover remaining branches in _remove_low_signal_turns."""
+    """Cover _remove_low_signal_turns with signal-scorer-based decisions."""
 
     def test_tool_messages_always_preserved(self) -> None:
         ctx = CompactionContext(
@@ -75,45 +77,30 @@ class TestRemoveLowSignalTurns:
             max_tokens=100_000,
         )
         result = _remove_low_signal_turns(ctx)
-        assert len(result) == 2  # all tool messages preserved
+        assert len(result) == 2
 
-    def test_assistant_with_keyword_fix(self) -> None:
+    def test_short_acknowledgement_dropped(self) -> None:
         ctx = CompactionContext(
             messages=[
-                {"role": "assistant", "content": "I need to fix the parser"},
+                {"role": "assistant", "content": "ok"},
             ],
             token_count=100,
             max_tokens=100_000,
         )
         result = _remove_low_signal_turns(ctx)
-        assert len(result) == 1  # preserved because "fix" keyword
+        assert len(result) == 0
 
-    def test_assistant_with_keyword_change(self) -> None:
+    def test_planning_discussion_preserved(self) -> None:
         ctx = CompactionContext(
             messages=[
-                {"role": "assistant", "content": "Let me change that file"},
-            ],
-            token_count=100,
-            max_tokens=100_000,
-        )
-        result = _remove_low_signal_turns(ctx)
-        assert len(result) == 1
-
-    def test_assistant_with_keyword_modify(self) -> None:
-        ctx = CompactionContext(
-            messages=[
-                {"role": "assistant", "content": "I will modify the import"},
-            ],
-            token_count=100,
-            max_tokens=100_000,
-        )
-        result = _remove_low_signal_turns(ctx)
-        assert len(result) == 1
-
-    def test_assistant_with_keyword_implement(self) -> None:
-        ctx = CompactionContext(
-            messages=[
-                {"role": "assistant", "content": "Time to implement the feature"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "I propose using a factory pattern instead. "
+                        "This approach trades simplicity for extensibility. "
+                        "What do you think about this alternative?"
+                    ),
+                },
             ],
             token_count=100,
             max_tokens=100_000,
@@ -121,10 +108,27 @@ class TestRemoveLowSignalTurns:
         result = _remove_low_signal_turns(ctx)
         assert len(result) == 1
 
-    def test_assistant_with_keyword_error(self) -> None:
+    def test_code_block_preserved(self) -> None:
         ctx = CompactionContext(
             messages=[
-                {"role": "assistant", "content": "Found an error in the code"},
+                {
+                    "role": "assistant",
+                    "content": "Here's the fix:\n```python\ndef solve():\n    pass\n```",
+                },
+            ],
+            token_count=100,
+            max_tokens=100_000,
+        )
+        result = _remove_low_signal_turns(ctx)
+        assert len(result) == 1
+
+    def test_question_preserved(self) -> None:
+        ctx = CompactionContext(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "Should we refactor the adapter? I'm concerned about the design.",
+                },
             ],
             token_count=100,
             max_tokens=100_000,
@@ -546,7 +550,7 @@ class TestGraduatedCompactorExceptions:
         )
 
         await compactor.emergency_compact(conv, client, "test-model")
-        assert compactor._last_stage_idx == 4
+        assert compactor._last_stage_idx >= EMERGENCY_STAGE_IDX
 
 
 # ── Get compaction prompt — medium path with logging ────────────────────────
@@ -804,3 +808,175 @@ class TestGetCompactionPromptCoverage:
     def test_between_thresholds_logs_medium(self) -> None:
         prompt = get_compaction_prompt("gemini-2-flash")
         assert prompt == COMPACTION_PROMPT_LARGE
+
+
+# ── Data-loss regression: factory-pattern discussion survives ───────────────
+
+
+class TestFactoryPatternSurvival:
+    """Stage 2 must preserve planning discussions (not just keyword hits)."""
+
+    def test_factory_pattern_discussion_survives_scorer(self) -> None:
+        from godspeed.context.compaction import _remove_low_signal_turns
+
+        ctx = CompactionContext(
+            messages=[
+                {"role": "user", "content": "How should we handle the instantiation?"},
+                {
+                    "role": "assistant",
+                    "content": (
+                        "I propose using a factory pattern. The factory encapsulates "
+                        "creation logic and lets us swap implementations without "
+                        "changing the caller. This is the recommended approach for "
+                        "our architecture. What do you think about this alternative?"
+                    ),
+                },
+                {"role": "assistant", "content": "sure"},
+                {"role": "user", "content": "sounds good"},
+            ],
+            token_count=200,
+            max_tokens=100_000,
+        )
+        result = _remove_low_signal_turns(ctx)
+        roles = [m["role"] for m in result]
+        assert "user" in roles
+        contents = [m.get("content", "") for m in result]
+        assert any("factory pattern" in c for c in contents)
+        assert not any(c == "sure" for c in contents)
+
+
+# ── Stage5 ≠ Stage4 ─────────────────────────────────────────────────────────
+
+
+class TestStage5DistinctFromStage4:
+    """Stage 5 (auto_compact) must differ from Stage 4 (context_collapse)."""
+
+    def test_stages_list_has_no_auto_compact(self) -> None:
+        names = [s.name for s in COMPACTION_STAGES]
+        assert "auto_compact" not in names
+
+    def test_context_collapse_is_last_deterministic(self) -> None:
+        assert COMPACTION_STAGES[-1].name == "context_collapse"
+
+    def test_emergency_compact_uses_llm_not_truncation(self) -> None:
+        compactor = GraduatedCompactor()
+        conv = Conversation("System", max_tokens=100_000)
+        for i in range(20):
+            conv.add_user_message(f"Message {i}")
+            conv.add_assistant_message(f"Response {i}")
+
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            return_value=ChatResponse(
+                content="LLM summary of everything", tool_calls=[], finish_reason="stop"
+            )
+        )
+
+        result = asyncio.run(compactor.emergency_compact(conv, client, "test-model"))
+        assert result.stage_name == "auto_compact"
+        summary_text = conv.messages[1]["content"]
+        assert "LLM summary" in summary_text
+        assert "[tool calls:" not in summary_text
+
+
+# ── replace_messages atomicity ───────────────────────────────────────────────
+
+
+class TestReplaceMessages:
+    """Conversation.replace_messages must atomically swap + invalidate caches."""
+
+    def test_replaces_and_invalidates_cache(self) -> None:
+        conv = Conversation("System", max_tokens=100_000)
+        conv.add_user_message("hello")
+        _ = conv.token_count
+        conv.replace_messages([{"role": "user", "content": "world"}])
+        assert conv.messages[1]["content"] == "world"
+        assert conv._token_count_cache is None
+
+    def test_does_not_leak_old_messages(self) -> None:
+        conv = Conversation("System", max_tokens=100_000)
+        conv.add_user_message("first")
+        conv.add_assistant_message("second")
+        conv.replace_messages([{"role": "user", "content": "only"}])
+        assert len(conv.messages) == 2
+        assert conv.messages[1]["content"] == "only"
+
+    def test_makes_defensive_copy(self) -> None:
+        conv = Conversation("System", max_tokens=100_000)
+        external = [{"role": "user", "content": "test"}]
+        conv.replace_messages(external)
+        external[0]["content"] = "mutated"
+        assert conv.messages[1]["content"] == "test"
+
+
+# ── _last_stage_idx guard ────────────────────────────────────────────────────
+
+
+class TestLastStageIdxGuard:
+    """_last_stage_idx must only advance forward, never regress."""
+
+    def test_emergency_does_not_regard_after_apply(self) -> None:
+        compactor = GraduatedCompactor()
+        conv = Conversation("System", max_tokens=100_000)
+        for i in range(50):
+            conv.add_user_message(f"Msg {i}")
+            conv.add_assistant_message(f"Rsp {i}")
+            conv.add_tool_result(f"t-{i}", f"Data {i}" * 50)
+
+        compactor.apply_stages(conv, 80_000, 100_000)
+        stage_after_apply = compactor._last_stage_idx
+        assert stage_after_apply >= 0
+
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            return_value=ChatResponse(content="Emergency", tool_calls=[], finish_reason="stop")
+        )
+        asyncio.run(compactor.emergency_compact(conv, client, "test"))
+        assert compactor._last_stage_idx >= stage_after_apply
+
+    def test_double_emergency_does_not_regard(self) -> None:
+        compactor = GraduatedCompactor()
+        conv = Conversation("System", max_tokens=100_000)
+        for i in range(20):
+            conv.add_user_message(f"M{i}")
+            conv.add_assistant_message(f"R{i}")
+
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            return_value=ChatResponse(content="Sum", tool_calls=[], finish_reason="stop")
+        )
+        asyncio.run(compactor.emergency_compact(conv, client, "m"))
+        first = compactor._last_stage_idx
+        asyncio.run(compactor.emergency_compact(conv, client, "m"))
+        assert compactor._last_stage_idx >= first
+
+class TestFailedStageSkip:
+    """A stage that raised is added to _failed_stages and never retried."""
+
+    def test_failed_stage_skipped_not_retried(self) -> None:
+        calls: list[int] = []
+
+        def boom(ctx: object) -> list:
+            calls.append(1)
+            msg = "boom"
+            raise RuntimeError(msg)
+
+        from godspeed.context.compaction import CompactionStage
+
+        stages = [
+            CompactionStage(name="boom", threshold_pct=0.10, preserves=[], strategy=boom),
+        ]
+        compactor = GraduatedCompactor(stages=stages)
+        conv = Conversation("System", max_tokens=100_000)
+        for i in range(5):
+            conv.add_user_message(f"M{i}")
+            conv.add_assistant_message(f"R{i}")
+
+        r1 = compactor.apply_stages(conv, 20_000, 100_000)
+        assert r1 == []
+        assert compactor._failed_stages == {0}
+        assert len(calls) == 1
+
+        r2 = compactor.apply_stages(conv, 20_000, 100_000)
+        assert r2 == []
+        assert len(calls) == 1
