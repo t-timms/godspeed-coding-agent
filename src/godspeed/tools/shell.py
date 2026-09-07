@@ -21,6 +21,15 @@ DEFAULT_TIMEOUT = 120
 MAX_TIMEOUT = 600
 MAX_COMMAND_LENGTH = 10000  # 10K characters max for shell commands
 
+# Cap on combined stdout/stderr returned to the model after a command
+# completes. 8000 chars keeps a single command's output readable inside the
+# context window while still surfacing the head of the output (where build
+# errors and test summaries usually land). Mirrors test_runner's truncation
+# spirit (5000 there); shell output is capped higher because commands like
+# `pytest -v` legitimately produce more. The timeout path is exempt — it
+# already tails the last 2000 chars of each stream.
+MAX_OUTPUT_CHARS = 8000
+
 
 class _ShellNotFoundError(Exception):
     """Raised when the shell executable cannot be found."""
@@ -28,6 +37,19 @@ class _ShellNotFoundError(Exception):
 
 class _ShellTimeoutError(Exception):
     """Raised when a shell command exceeds its timeout."""
+
+
+def _truncate_output(output: str) -> str:
+    """Cap combined command output at MAX_OUTPUT_CHARS, keeping the head.
+
+    Mirrors test_runner's truncation: keep the first MAX_OUTPUT_CHARS chars
+    and append a marker reporting how many chars were cut so the model knows
+    output was truncated. Output at or under the cap passes through unchanged.
+    """
+    if len(output) <= MAX_OUTPUT_CHARS:
+        return output
+    truncated = len(output) - MAX_OUTPUT_CHARS
+    return output[:MAX_OUTPUT_CHARS] + f"\n... ({truncated} chars truncated)"
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -287,6 +309,7 @@ class ShellTool(Tool):
             output_parts.append(f"STDERR:\n{stderr}")
 
         output = "\n".join(output_parts) if output_parts else "(no output)"
+        output = _truncate_output(output)
 
         if returncode != 0:
             return ToolResult.failure(f"Exit code {returncode}\n{output}")

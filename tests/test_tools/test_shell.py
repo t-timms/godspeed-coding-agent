@@ -20,6 +20,7 @@ import pytest
 import godspeed.tools.shell as shell_mod
 from godspeed.tools.base import ToolContext
 from godspeed.tools.shell import (
+    MAX_OUTPUT_CHARS,
     ShellTool,
     _detect_shell,
     _kill_process_tree,
@@ -644,3 +645,86 @@ class TestShellTool:
             _kill_process_tree(12345)
 
         parent.kill.assert_called_once()
+
+
+class TestOutputTruncation:
+    """Output cap behavior for completed (non-timeout) commands."""
+
+    @pytest.mark.asyncio
+    async def test_output_at_cap_passes_through_exactly(
+        self, tool: ShellTool, tool_context: ToolContext
+    ) -> None:
+        stdout_data = "y" * MAX_OUTPUT_CHARS
+        mock_proc = _mock_popen(stdout=stdout_data, stderr="", returncode=0)
+        with patch("godspeed.tools.shell.subprocess.Popen", return_value=mock_proc):
+            result = await tool.execute({"command": "big-cmd"}, tool_context)
+
+        assert not result.is_error
+        assert result.output == stdout_data
+
+    @pytest.mark.asyncio
+    async def test_output_below_cap_passes_through_exactly(
+        self, tool: ShellTool, tool_context: ToolContext
+    ) -> None:
+        stdout_data = "z" * (MAX_OUTPUT_CHARS - 100)
+        mock_proc = _mock_popen(stdout=stdout_data, stderr="", returncode=0)
+        with patch("godspeed.tools.shell.subprocess.Popen", return_value=mock_proc):
+            result = await tool.execute({"command": "small-cmd"}, tool_context)
+
+        assert not result.is_error
+        assert result.output == stdout_data
+
+    @pytest.mark.asyncio
+    async def test_output_over_cap_truncated_with_marker(
+        self, tool: ShellTool, tool_context: ToolContext
+    ) -> None:
+        stdout_data = "a" * MAX_OUTPUT_CHARS + "b" * 5000
+        mock_proc = _mock_popen(stdout=stdout_data, stderr="", returncode=0)
+        with patch("godspeed.tools.shell.subprocess.Popen", return_value=mock_proc):
+            result = await tool.execute({"command": "huge-cmd"}, tool_context)
+
+        assert not result.is_error
+        assert result.output.startswith("a" * MAX_OUTPUT_CHARS)
+        assert "... (5000 chars truncated)" in result.output
+        assert "b" not in result.output
+
+    @pytest.mark.asyncio
+    async def test_failure_path_truncated_too(
+        self, tool: ShellTool, tool_context: ToolContext
+    ) -> None:
+        stderr_data = "e" * (MAX_OUTPUT_CHARS + 2500)
+        mock_proc = _mock_popen(stdout="", stderr=stderr_data, returncode=1)
+        with patch("godspeed.tools.shell.subprocess.Popen", return_value=mock_proc):
+            result = await tool.execute({"command": "failing-cmd"}, tool_context)
+
+        combined_len = len("STDERR:\n") + len(stderr_data)
+        expected_truncated = combined_len - MAX_OUTPUT_CHARS
+        assert result.is_error
+        assert "Exit code 1" in result.error
+        assert f"... ({expected_truncated} chars truncated)" in result.error
+
+    @pytest.mark.asyncio
+    async def test_timeout_path_unchanged_by_output_cap(
+        self, tool: ShellTool, tool_context: ToolContext
+    ) -> None:
+        """Timeout path still tails 2000 chars — MAX_OUTPUT_CHARS does not apply."""
+        stdout_data = "t" * (MAX_OUTPUT_CHARS + 1000)
+        mock_proc = MagicMock()
+        mock_proc.communicate.side_effect = [
+            subprocess.TimeoutExpired(cmd="cmd", timeout=5),
+            (stdout_data, ""),
+        ]
+        mock_proc.pid = 44444
+        mock_proc.returncode = None
+
+        with (
+            patch("godspeed.tools.shell.subprocess.Popen", return_value=mock_proc),
+            patch("godspeed.tools.shell._kill_process_tree"),
+        ):
+            result = await tool.execute({"command": "slow-cmd", "timeout": 2}, tool_context)
+
+        assert result.is_error
+        assert "timed out" in result.error.lower()
+        assert "STDOUT tail" in result.error
+        assert "t" * 2000 in result.error
+        assert "chars truncated" not in result.error

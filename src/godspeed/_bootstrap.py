@@ -125,6 +125,7 @@ def _build_tool_registry(
     from godspeed.tools.security_scan import SecurityScanTool
     from godspeed.tools.shell import ShellTool
     from godspeed.tools.test_runner import TestRunnerTool
+    from godspeed.tools.think import ThinkTool
     from godspeed.tools.traceback_analyzer import TracebackAnalyzerTool
     from godspeed.tools.verify import VerifyTool
     from godspeed.tools.web_fetch import WebFetchTool
@@ -153,6 +154,7 @@ def _build_tool_registry(
         CoverageTool(),
         SecurityScanTool(),
         ComplexityTool(),
+        ThinkTool(),
         DepAuditTool(),
         GenerateTestsTool(),
         WebSearchTool(),
@@ -206,6 +208,14 @@ def _build_tool_registry(
         tools.append(LlamaCppTool())
     except ImportError:
         logger.debug("llamacpp_manager not available")
+
+    from godspeed.tools.acceptance import (
+        AcceptanceInitTool,
+        AcceptanceStatusTool,
+        AcceptanceUpdateTool,
+    )
+
+    tools.extend([AcceptanceInitTool(), AcceptanceUpdateTool(), AcceptanceStatusTool()])
 
     for tool in tools:
         if allowed is not None and tool.name not in allowed:

@@ -75,7 +75,7 @@ class TestExecute:
     ) -> None:
         """Test execute with framework argument."""
         with patch("godspeed.tools.test_runner._RUNNERS") as mock_runners:
-            mock_runners.get.return_value = lambda cwd, target: "mocked result"
+            mock_runners.get.return_value = lambda cwd, target, repeat: "mocked result"
             await runner.execute({"framework": "pytest"}, ctx)
             mock_runners.get.assert_called_once_with("pytest")
 

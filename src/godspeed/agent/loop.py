@@ -18,6 +18,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from godspeed.agent.completion_gate import (
+    CompletionGateState,
+    GateDecision,
+    get_checklist_message,
+    should_block,
+)
 from godspeed.agent.conversation import Conversation
 from godspeed.agent.result import AgentCancelledError, AgentMetrics, ExitReason
 from godspeed.hooks import HookEvent
@@ -132,6 +138,8 @@ class _LoopState:
     pending_background_tasks: list[asyncio.Task] = field(default_factory=list)
     verify_failure_count: int = 0
     budget_prompt_injected: bool = False
+    has_edits_since_verify: bool = False
+    stop_attempts: int = 0
 
     # --- Loop config (set once at loop start) ---
     auto_fix_retries: int = 3
@@ -185,6 +193,7 @@ async def agent_loop(
     llm_retry_delay: float = 2.0,
     budget_verify_cap: int = 3,
     task_store: Any | None = None,
+    completion_gate: bool = False,
 ) -> str:
     """Run the agent loop until the model stops calling tools.
 
@@ -311,6 +320,13 @@ async def agent_loop(
             if nudge is not None and not _last_message_is_nudge(conversation.messages, nudge):
                 conversation.add_user_message(nudge)
 
+        # Acceptance summary: surface failing criteria alongside the task nudge.
+        acceptance_summary = _acceptance_summary(tool_context)
+        if acceptance_summary is not None and not _last_message_is_nudge(
+            conversation.messages, acceptance_summary
+        ):
+            conversation.add_user_message(acceptance_summary)
+
         # Call LLM (streaming or batch) with retry for transient errors
         llm_t0 = time.monotonic()
         response: ChatResponse | None = None
@@ -414,6 +430,26 @@ async def agent_loop(
         # Handle text response (model decided to stop)
         if not response.has_tool_calls:
             final_text = _strip_meta_commentary(response.content)
+            if completion_gate:
+                state.stop_attempts += 1
+                gate_state = CompletionGateState(
+                    has_edits_since_verify=state.has_edits_since_verify,
+                    tasks_open=_tasks_open(task_store, tool_context),
+                    stop_attempts=state.stop_attempts,
+                )
+                if should_block(gate_state) == GateDecision.BLOCK:
+                    if final_text:
+                        conversation.add_assistant_message(
+                            content=final_text,
+                            reasoning_content=response.thinking,
+                        )
+                    conversation.add_user_message(get_checklist_message())
+                    logger.info(
+                        "Completion gate blocked stop attempt=%d edits=%s",
+                        state.stop_attempts,
+                        state.has_edits_since_verify,
+                    )
+                    continue
             if final_text:
                 # NEW: Pass reasoning_content for DeepSeek V4 multi-turn
                 conversation.add_assistant_message(
@@ -876,10 +912,14 @@ async def _post_process_results(
 
     for tc, result in paired:
         # Check for write operations
-        if not result.is_error and tc.tool_name in ("file_edit", "file_write"):
+        if not result.is_error and tc.tool_name in ("file_edit", "file_write", "diff_apply"):
             write_results.append((tc, result))
-        elif tc.tool_name not in ("file_edit", "file_write"):
+            state.has_edits_since_verify = True
+        elif tc.tool_name not in ("file_edit", "file_write", "diff_apply"):
             has_non_write = True
+
+        if not result.is_error and tc.tool_name in ("verify", "test_runner"):
+            state.has_edits_since_verify = False
 
         # Stuck-loop detection (inline to avoid another pass)
         if result.is_error:
@@ -1043,8 +1083,9 @@ async def _post_process_single_result(
             )
             state.pending_background_tasks.append(task)
 
-    if not result.is_error and tool_call.tool_name in ("file_edit", "file_write"):
+    if not result.is_error and tool_call.tool_name in ("file_edit", "file_write", "diff_apply"):
         state.consecutive_writes += 1
+        state.has_edits_since_verify = True
         if (
             state.consecutive_writes >= state.stash_threshold
             and not state.auto_stashed
@@ -1100,6 +1141,8 @@ async def _post_process_single_result(
             if committed:
                 state.consecutive_successful_edits = 0
                 state.recent_change_descriptions.clear()
+    elif not result.is_error and tool_call.tool_name in ("verify", "test_runner"):
+        state.has_edits_since_verify = False
     else:
         state.consecutive_writes = 0
         state.consecutive_successful_edits = 0
@@ -1242,6 +1285,8 @@ async def _drain_background_tasks(
             tool_call_id=result.call_id,
             content=result.output,
         )
+        if not result.must_fix_increment:
+            state.has_edits_since_verify = False
         state.must_fix_injections = _maybe_inject_must_fix(
             conversation,
             result.must_fix_file,
@@ -1376,6 +1421,43 @@ def _parse_tool_call(raw: dict[str, Any]) -> ToolCall | None:
     except (json.JSONDecodeError, TypeError, KeyError):
         logger.warning("Malformed tool call: %s", raw)
         return None
+
+
+def _acceptance_summary(tool_context: ToolContext | None) -> str | None:
+    """Return a one-line summary of failing acceptance items, or None."""
+    if tool_context is None:
+        return None
+    from godspeed.tools.acceptance import (
+        ACCEPTANCE_DIRNAME,
+        ACCEPTANCE_FILENAME,
+        AcceptanceContract,
+    )
+
+    contract_path = tool_context.cwd / ACCEPTANCE_DIRNAME / ACCEPTANCE_FILENAME
+    if not contract_path.exists():
+        return None
+    active = AcceptanceContract.load(contract_path).format_active()
+    if active is None:
+        return None
+    return f"Acceptance criteria still failing:\n{active}"
+
+
+def _tasks_open(task_store: Any | None, tool_context: ToolContext | None) -> bool:
+    """Return True when open tasks or failing acceptance items remain."""
+    if task_store is not None and any(t.status != "completed" for t in task_store.list_all()):
+        return True
+    if tool_context is None:
+        return False
+    from godspeed.tools.acceptance import (
+        ACCEPTANCE_DIRNAME,
+        ACCEPTANCE_FILENAME,
+        AcceptanceContract,
+    )
+
+    contract_path = tool_context.cwd / ACCEPTANCE_DIRNAME / ACCEPTANCE_FILENAME
+    if not contract_path.exists():
+        return False
+    return bool(AcceptanceContract.load(contract_path).failing_items())
 
 
 def _is_context_overflow(exc: Exception) -> bool:
