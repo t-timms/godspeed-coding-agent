@@ -16,7 +16,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from godspeed.security.secrets import redact_secrets
+
 logger = logging.getLogger(__name__)
+
+
+def _redact(value: Any) -> Any:
+    """Recursively redact secret-bearing strings in a log record."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {key: _redact(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
 
 
 class ConversationLogger:
@@ -174,7 +187,13 @@ class ConversationLogger:
     # -- internals -----------------------------------------------------------
 
     def _write(self, record: dict[str, Any]) -> None:
-        """Serialize one record as a JSON line and flush."""
+        """Serialize one record as a JSON line and flush.
+
+        String values are passed through the secrets redactor first:
+        conversation logs can embed tool output, which may contain
+        credentials. Redaction here keeps the training corpus safe to
+        store and share.
+        """
         record["timestamp"] = datetime.now(tz=UTC).isoformat()
         record["session_id"] = self._session_id
 
@@ -182,7 +201,7 @@ class ConversationLogger:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
 
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        line = json.dumps(_redact(record), ensure_ascii=False, separators=(",", ":"))
         self._file.write(line + "\n")
         self._writes_since_flush += 1
         if self._writes_since_flush >= self._FLUSH_INTERVAL:
