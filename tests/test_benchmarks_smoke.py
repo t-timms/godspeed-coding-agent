@@ -17,6 +17,7 @@ import pytest
 
 from godspeed.benchmarks.preflight import (
     PreFlightReport,
+    _default_fetch,
     check_nim_connectivity,
     check_python_env,
     print_report,
@@ -144,6 +145,15 @@ class TestPreflightOffline:
         assert "skipped" in conn.detail
         # No per-key failure checks were recorded because no network was attempted
         assert not any(r.name.startswith("NIM key #") for r in report.results)
+
+    def test_default_fetch_matches_fetchfn_contract(self) -> None:
+        """_default_fetch accepts the positional FetchFn contract (url, headers, timeout)."""
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            _default_fetch("https://example.invalid/models", {"Authorization": "Bearer x"}, 10)
+        mock_urlopen.assert_called_once()
+        call_args = mock_urlopen.call_args
+        assert call_args.args[0].get_full_url() == "https://example.invalid/models"
+        assert call_args.kwargs["timeout"] == 10
 
 
 # ---------------------------------------------------------------------------

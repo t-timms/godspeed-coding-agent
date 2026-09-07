@@ -62,8 +62,12 @@ class PreFlightReport:
         }
 
 
-def _default_fetch(url: str, *, headers: dict[str, str] | None = None, timeout: int = 10) -> Any:
-    """Production fetcher — hits the real network."""
+def _default_fetch(url: str, headers: dict[str, str] | None = None, timeout: int = 10) -> Any:
+    """Production fetcher - hits the real network.
+
+    Positional parameters match the ``FetchFn`` contract used at the
+    ``check_nim_connectivity`` call site.
+    """
     import urllib.request
 
     req = urllib.request.Request(url, headers=headers or {})  # noqa: S310
