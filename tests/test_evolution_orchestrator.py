@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -244,7 +244,9 @@ class TestEvolutionOrchestratorEdgeCases:
                         "godspeed.evolution.orchestrator.FitnessEvaluator.evaluate",
                         return_value=fake_score,
                     ):
-                        with patch.object(orch._safety, "gate", return_value=fake_verdict):
+                        with patch.object(
+                            orch._safety, "gate", new_callable=AsyncMock, return_value=fake_verdict
+                        ):
                             with patch.object(orch._registry, "register", return_value="rec-123"):
                                 with patch.object(orch._applier, "apply_tool_description"):
                                     with patch.object(registry, "update_description"):
@@ -450,7 +452,9 @@ class TestEvolutionOrchestratorEdgeCases:
                         "godspeed.evolution.orchestrator.FitnessEvaluator.evaluate",
                         return_value=fake_score,
                     ):
-                        with patch.object(orch._safety, "gate", return_value=fake_verdict):
+                        with patch.object(
+                            orch._safety, "gate", new_callable=AsyncMock, return_value=fake_verdict
+                        ):
                             report = await orch.run_cycle()
 
         assert report["mutations_generated"] == 1
@@ -538,7 +542,9 @@ class TestEvolutionOrchestratorEdgeCases:
                         "godspeed.evolution.orchestrator.FitnessEvaluator.evaluate",
                         return_value=fake_score,
                     ):
-                        with patch.object(orch._safety, "gate", return_value=fake_verdict):
+                        with patch.object(
+                            orch._safety, "gate", new_callable=AsyncMock, return_value=fake_verdict
+                        ):
                             report = await orch.run_cycle()
 
         assert report["mutations_generated"] == 1
@@ -683,7 +689,9 @@ class TestEvolutionOrchestratorEdgeCases:
                         "godspeed.evolution.orchestrator.FitnessEvaluator.evaluate",
                         return_value=fake_score,
                     ):
-                        with patch.object(orch._safety, "gate", return_value=fake_verdict):
+                        with patch.object(
+                            orch._safety, "gate", new_callable=AsyncMock, return_value=fake_verdict
+                        ):
                             with patch.object(orch._registry, "register", return_value="rec-123"):
                                 with patch.object(orch._applier, "apply_tool_description"):
                                     with patch.object(registry, "update_description"):
@@ -749,6 +757,106 @@ class TestEvolutionOrchestratorEdgeCases:
                     report = await orch.run_cycle()
 
         assert "mutate file_read: llm down" in report["errors"]
+
+    @pytest.mark.asyncio
+    async def test_test_suite_failure_blocks_mutation(self, tmp_path: Path) -> None:
+        from godspeed.evolution.fitness import FitnessScore
+        from godspeed.evolution.mutator import MutationCandidate
+        from godspeed.evolution.safety import SafetyVerdict
+        from godspeed.evolution.trace_analyzer import (
+            EvolutionReport,
+            SessionTrace,
+            ToolCall,
+            ToolFailurePattern,
+        )
+
+        registry = MagicMock()
+        fake_tool = _FakeTool("file_read", RiskLevel.READ_ONLY)
+        registry.get.return_value = fake_tool
+        registry.list_tools.return_value = [fake_tool]
+
+        orch = EvolutionOrchestrator(
+            tool_registry=registry,
+            audit_dir=tmp_path,
+            max_cost_usd=0.50,
+            evo_dir=tmp_path,
+        )
+
+        fake_trace = SessionTrace(
+            session_id="s1",
+            tool_calls=(ToolCall("file_read", {}, 10, True, 100.0, "error"),),
+            errors=(ToolCall("file_read", {}, 10, True, 100.0, "error"),),
+            permission_denials=(),
+            permission_grants=(),
+            total_latency_ms=100.0,
+            model="test",
+        )
+        fake_failure = ToolFailurePattern(
+            tool_name="file_read",
+            error_category="invalid_args",
+            frequency=3,
+            example_args=({},),
+            suggested_fix="n/a",
+        )
+        fake_report = EvolutionReport(
+            sessions_analyzed=1,
+            tool_failures=(fake_failure,),
+            latency_stats=(),
+            permission_insights=(),
+            tool_sequences=(),
+            most_used_tools=(),
+            error_rate=0.5,
+        )
+        fake_candidate = MutationCandidate(
+            artifact_type="tool_description",
+            artifact_id="file_read",
+            original="old",
+            mutated="new",
+            mutation_rationale="fix",
+            model_used="test",
+        )
+        fake_score = FitnessScore(
+            correctness=0.8,
+            procedure_following=0.7,
+            conciseness=0.9,
+            overall=0.8,
+            length_penalty=0.0,
+            confidence=0.6,
+        )
+        failing_verdict = SafetyVerdict(
+            passed=False,
+            checks=(
+                ("size_limit", True, "ok"),
+                ("semantic_drift", True, "ok"),
+                ("fitness_threshold", True, "ok"),
+                ("confidence", True, "ok"),
+                ("test_suite", False, "pytest exit_code=1"),
+            ),
+            requires_human_review=False,
+        )
+
+        with patch.object(orch._analyzer, "load_sessions", return_value=[fake_trace]):
+            with patch.object(orch._analyzer, "generate_report", return_value=fake_report):
+                with patch(
+                    "godspeed.evolution.orchestrator.EvolutionEngine.mutate_tool_description",
+                    return_value=[fake_candidate],
+                ):
+                    with patch(
+                        "godspeed.evolution.orchestrator.FitnessEvaluator.evaluate",
+                        return_value=fake_score,
+                    ):
+                        with patch.object(
+                            orch._safety,
+                            "gate",
+                            new_callable=AsyncMock,
+                            return_value=failing_verdict,
+                        ):
+                            with patch.object(orch._registry, "register", return_value="rec-456"):
+                                report = await orch.run_cycle()
+
+        assert report["mutations_generated"] == 1
+        assert report["mutations_applied"] == 0
+        assert report["mutations_rejected"] == 1
 
 
 # -- Tests: build_system_prompt with memory -----------------------------------

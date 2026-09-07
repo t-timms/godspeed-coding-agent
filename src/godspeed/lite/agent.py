@@ -538,12 +538,14 @@ class GodspeedLite:
     def _run_bash(self, command: str) -> str:
         """Execute a shell command. Stateless — fresh shell every time."""
         try:
-            result = subprocess.run(  # noqa: S602
+            result = subprocess.run(  # noqa: S602 # nosec B602 - lite benchmark agent: stateless bash by design
                 command,
                 shell=True,
                 cwd=str(self._workdir),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self._cfg.step_timeout,
             )
             out = result.stdout
@@ -563,9 +565,11 @@ class GodspeedLite:
                 cwd=str(self._workdir),
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=30,
             )
-            return result.stdout
+            return result.stdout or ""
         except Exception:  # noqa: BLE001
             return ""
 

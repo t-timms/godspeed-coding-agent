@@ -109,6 +109,78 @@ _RESULT_MAX_CHARS = 2000
 # Rule width for horizontal separators
 _RULE_WIDTH = 35
 
+# Default statusline template used when statusline is enabled without a
+# custom template. Placeholders: {model}, {tokens}, {cost}, {branch}.
+DEFAULT_STATUSLINE_TEMPLATE = "{model} | {tokens} tokens | {cost} | {branch}"
+
+
+def _get_git_branch() -> str:
+    """Return the current git branch name, or '' when not in a git repo."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (subprocess.SubprocessError, FileNotFoundError):
+        pass
+    return ""
+
+
+def _configured_statusline_template() -> str | None:
+    """Return the configured statusline template, or None when disabled.
+
+    Reads ``statusline`` from :class:`GodspeedSettings`. Returns the custom
+    template when set, the built-in default when enabled with an empty
+    template, and None when statusline is disabled.
+    """
+    try:
+        from godspeed.config import GodspeedSettings
+
+        statusline = GodspeedSettings().statusline
+    except Exception:
+        return None
+    if not statusline.enabled:
+        return None
+    return statusline.template or DEFAULT_STATUSLINE_TEMPLATE
+
+
+def _render_statusline_template(
+    template: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_usd: float,
+    model: str,
+) -> str | None:
+    """Render a statusline template with known placeholders.
+
+    Returns None when the template contains unknown placeholders or otherwise
+    fails to render, so callers can fall back to the default HUD.
+    """
+    from godspeed.llm.cost import format_cost
+
+    model_short = model.split("/", 1)[-1] if "/" in model else model
+    total = input_tokens + output_tokens
+
+    values: dict[str, str] = {
+        "model": model_short,
+        "tokens": f"{total:,}",
+        "cost": format_cost(cost_usd),
+        "branch": "",
+    }
+    if "{branch}" in template:
+        values["branch"] = _get_git_branch() or "?"
+
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError, IndexError):
+        return None
+
 
 def _rule() -> str:
     """Return a thin horizontal rule string."""
@@ -530,8 +602,35 @@ def format_status_hud(
     context_pct: float = 0.0,
     permission_mode: str = "",
     preset: str = "",
+    template: str | None = None,
+    goal: str = "",
 ) -> None:
-    """Print a minimal one-line session HUD after each completed turn."""
+    """Print a minimal one-line session HUD after each completed turn.
+
+    When *template* is provided — or configured via ``statusline.template`` —
+    it is rendered with ``{model}``, ``{tokens}``, ``{cost}``, and ``{branch}``
+    placeholders. An invalid template falls back to the default HUD and logs
+    a warning.
+
+    When *goal* is non-empty it is appended to the default HUD as
+    ``| goal: ...``.
+    """
+    if template is None:
+        template = _configured_statusline_template()
+
+    if template is not None:
+        rendered = _render_statusline_template(
+            template,
+            input_tokens,
+            output_tokens,
+            cost_usd,
+            model,
+        )
+        if rendered is not None:
+            console.print(f"  {rendered}")
+            return
+        logger.warning("Invalid statusline template %r — falling back to default HUD", template)
+
     parts: list[str] = []
 
     # Token count
@@ -576,6 +675,10 @@ def format_status_hud(
         parts.append(styled("strict", WARNING))
     elif permission_mode == "plan":
         parts.append(styled("plan", PRIMARY))
+
+    # Session goal
+    if goal:
+        parts.append(styled(f"goal: {goal}", NEUTRAL))
 
     console.print(f"  {' | '.join(parts)}")
 

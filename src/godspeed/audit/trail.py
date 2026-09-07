@@ -93,11 +93,14 @@ class AuditTrail:
         event_type: AuditEventType | str,
         detail: dict | None = None,
         outcome: str = "success",
+        **extra: Any,
     ) -> AuditRecord:
         """Append a record to the audit trail (sync version).
 
         Thread-safe. For async contexts, prefer :meth:`arecord` to avoid
-        blocking the event loop.
+        blocking the event loop. Extra keyword arguments set optional record
+        fields (parent_session_id, is_sidechain, cost_usd, lines_added,
+        lines_removed) before hashing.
         """
         safe_detail = redact_audit_detail(detail or {})
 
@@ -112,6 +115,8 @@ class AuditTrail:
                 outcome=outcome,
                 prev_hash=self._prev_hash,
             )
+            for key, value in extra.items():
+                setattr(event, key, value)
 
             record_json = event.model_dump_json(exclude={"record_hash"})
             event.record_hash = hashlib.sha256(record_json.encode()).hexdigest()
@@ -139,11 +144,13 @@ class AuditTrail:
         event_type: AuditEventType | str,
         detail: dict | None = None,
         outcome: str = "success",
+        **extra: Any,
     ) -> AuditRecord:
         """Append a record to the audit trail (async version).
 
         Blocking I/O (file open, write, flush, fsync) is offloaded to a
-        thread pool so the asyncio event loop never stalls.
+        thread pool so the asyncio event loop never stalls. Extra keyword
+        arguments set optional record fields before hashing.
         """
         safe_detail = redact_audit_detail(detail or {})
 
@@ -158,6 +165,8 @@ class AuditTrail:
                 outcome=outcome,
                 prev_hash=self._prev_hash,
             )
+            for key, value in extra.items():
+                setattr(event, key, value)
 
             record_json = event.model_dump_json(exclude={"record_hash"})
             event.record_hash = hashlib.sha256(record_json.encode()).hexdigest()

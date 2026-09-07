@@ -334,6 +334,32 @@ class TestArchitectLoop:
 
     @pytest.mark.asyncio
     @patch("godspeed.agent.architect.agent_loop", new_callable=AsyncMock)
+    async def test_architect_model_restored_on_plan_error(
+        self, mock_agent_loop: AsyncMock, tmp_path: Path
+    ) -> None:
+        """Model must be restored even when the plan phase raises."""
+        mock_agent_loop.side_effect = RuntimeError("plan failed")
+
+        registry = _make_registry()
+        context = _make_context(tmp_path)
+        conversation = _make_conversation()
+        client = _make_llm_client()
+        client.model = "main-model"
+
+        with pytest.raises(RuntimeError, match="plan failed"):
+            await architect_loop(
+                user_input="Build it",
+                conversation=conversation,
+                llm_client=client,
+                tool_registry=registry,
+                tool_context=context,
+                architect_model="planning-model",
+            )
+
+        assert client.model == "main-model"
+
+    @pytest.mark.asyncio
+    @patch("godspeed.agent.architect.agent_loop", new_callable=AsyncMock)
     async def test_plan_conversation_uses_architect_system_prompt(
         self, mock_agent_loop: AsyncMock, tmp_path: Path
     ) -> None:

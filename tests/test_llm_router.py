@@ -335,18 +335,15 @@ class TestRoutingEndToEnd:
         task_type = classify_task_type(msgs)
         assert task_type == TASK_EDIT
 
-        captured: dict[str, str] = {}
-
-        async def _capture(*_args: object, **_kwargs: object) -> ChatResponse:
-            captured["model_during_call"] = client.model
-            return ChatResponse(content="ok", finish_reason="stop")
-
-        client._chat_with_fallback = AsyncMock(side_effect=_capture)
+        mock_fallback = AsyncMock(
+            return_value=ChatResponse(content="ok", finish_reason="stop"),
+        )
+        client._chat_with_fallback = mock_fallback
         await client.chat(messages=msgs, task_type=task_type)
 
-        # During the call, the model was swapped to the cheap one.
-        assert captured["model_during_call"] == "ollama/qwen3:4b"
-        # After the call, it was restored.
+        # The resolved model is passed as _model kwarg, never mutating self.
+        call_kwargs = mock_fallback.call_args
+        assert call_kwargs.kwargs.get("_model") == "ollama/qwen3:4b"
         assert client.model == "claude-sonnet-4"
 
     @pytest.mark.asyncio
@@ -363,14 +360,12 @@ class TestRoutingEndToEnd:
         task_type = classify_task_type(msgs)
         assert task_type == TASK_PLAN
 
-        captured: dict[str, str] = {}
-
-        async def _capture(*_args: object, **_kwargs: object) -> ChatResponse:
-            captured["model_during_call"] = client.model
-            return ChatResponse(content="plan", finish_reason="stop")
-
-        client._chat_with_fallback = AsyncMock(side_effect=_capture)
+        mock_fallback = AsyncMock(
+            return_value=ChatResponse(content="plan", finish_reason="stop"),
+        )
+        client._chat_with_fallback = mock_fallback
         await client.chat(messages=msgs, task_type=task_type)
 
-        assert captured["model_during_call"] == "claude-sonnet-4"
+        call_kwargs = mock_fallback.call_args
+        assert call_kwargs.kwargs.get("_model") == "claude-sonnet-4"
         assert client.model == "ollama/qwen3:4b"

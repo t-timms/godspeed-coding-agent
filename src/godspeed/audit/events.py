@@ -42,3 +42,8 @@ class AuditRecord(BaseModel):
     outcome: str = "success"  # "success" | "denied" | "error" | "timeout"
     prev_hash: str = ""  # SHA-256 of previous record (empty for first record)
     record_hash: str = ""  # Computed after creation
+    parent_session_id: str | None = None  # set when session forked from another
+    is_sidechain: bool = False  # True for sub-agent transcripts
+    cost_usd: float | None = None
+    lines_added: int | None = None
+    lines_removed: int | None = None

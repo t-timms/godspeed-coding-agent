@@ -12,36 +12,25 @@ class HookEvent(StrEnum):
     - Session: session lifecycle
     - Permission: permission engine decisions
     - Tool: tool execution lifecycle
-    - File: file operation lifecycle
     - Context: context management and compaction
     - Subagent: sub-agent spawn and completion
-    - Evolution: harness evolution lifecycle
     - Safety: security and safety events
-    - Audit: audit trail events
     - Workflow: orchestrated workflow phases
+    - Misc: stop, notification
     """
 
     # Session lifecycle
     SESSION_START = "session_start"
     SESSION_END = "session_end"
-    TURN_END = "turn_end"
 
     # Permission lifecycle
     PRE_PERMISSION_CHECK = "pre_permission_check"
     POST_PERMISSION_CHECK = "post_permission_check"
     PERMISSION_DENIED = "permission_denied"
-    PERMISSION_GRANTED = "permission_granted"
 
     # Tool lifecycle
     PRE_TOOL_CALL = "pre_tool_call"
     POST_TOOL_CALL = "post_tool_call"
-    TOOL_ERROR = "tool_error"
-    TOOL_RETRY = "tool_retry"
-
-    # File operation lifecycle
-    PRE_FILE_WRITE = "pre_file_write"
-    POST_FILE_WRITE = "post_file_write"
-    PRE_FILE_READ = "pre_file_read"
 
     # Context management
     PRE_COMPACTION = "pre_compaction"
@@ -53,11 +42,8 @@ class HookEvent(StrEnum):
     # Subagent lifecycle
     PRE_SUBAGENT_SPAWN = "pre_subagent_spawn"
     POST_SUBAGENT_COMPLETE = "post_subagent_complete"
+    POST_SUBAGENT_STOP = "post_subagent_stop"
     SUBAGENT_ERROR = "subagent_error"
-
-    # Evolution and training
-    PRE_EVOLUTION_RUN = "pre_evolution_run"
-    POST_EVOLUTION_RUN = "post_evolution_run"
 
     # Safety events
     SECRET_DETECTED = "secret_detected"  # noqa: S105
@@ -65,13 +51,11 @@ class HookEvent(StrEnum):
     STUCK_LOOP_DETECTED = "stuck_loop_detected"
     BUDGET_EXCEEDED = "budget_exceeded"
 
-    # Audit
-    AUDIT_WRITE = "audit_write"
-
-    # Graph (GCG)
-    POST_GRAPH_BUILD = "post_graph_build"
-
     # Workflow
     WORKFLOW_PHASE_COMPLETE = "workflow_phase_complete"
     WORKFLOW_COMPLETE = "workflow_complete"
     WORKFLOW_REJECTED = "workflow_rejected"
+
+    # Misc
+    STOP = "stop"
+    NOTIFICATION = "notification"

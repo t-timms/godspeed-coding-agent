@@ -10,9 +10,12 @@ All mutations must pass safety checks before being applied:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import logging
 import re
+import sys
+from collections.abc import Awaitable, Callable
 
 from godspeed.evolution.fitness import FitnessScore
 from godspeed.evolution.mutator import MutationCandidate
@@ -83,39 +86,44 @@ class SafetyGate:
         max_growth: float = 2.0,
         min_similarity: float = 0.3,
         min_fitness: float = 0.6,
+        test_suite_timeout: float = 120.0,
+        test_runner: Callable[[], Awaitable[tuple[bool, str]]] | None = None,
     ) -> None:
         self._max_growth = max_growth
         self._min_similarity = min_similarity
         self._min_fitness = min_fitness
+        self._test_suite_timeout = test_suite_timeout
+        self._test_runner = test_runner
 
-    def gate(
+    async def gate(
         self,
         candidate: MutationCandidate,
         score: FitnessScore,
     ) -> SafetyVerdict:
         """Run all safety checks and return a verdict.
 
-        Does NOT run the test suite (that's an async operation handled
-        separately). This gate covers the fast, synchronous checks.
+        Runs synchronous checks (size, drift, fitness, confidence) plus the
+        async test suite.  A test-suite error or timeout is treated as a
+        failure (fail-closed) so that no mutation can bypass verification.
         """
         checks: list[tuple[str, bool, str]] = []
 
-        # Check 1: Size limit
         size_ok, size_msg = self.check_size_limit(candidate)
         checks.append(("size_limit", size_ok, size_msg))
 
-        # Check 2: Semantic drift
         drift_ok, drift_msg = self.check_semantic_drift(candidate)
         checks.append(("semantic_drift", drift_ok, drift_msg))
 
-        # Check 3: Fitness threshold
         fitness_ok, fitness_msg = self.check_fitness_threshold(score)
         checks.append(("fitness_threshold", fitness_ok, fitness_msg))
 
-        # Check 4: Confidence threshold
         conf_ok = score.confidence >= 0.5
         conf_msg = f"confidence={score.confidence:.2f} (min=0.50)"
         checks.append(("confidence", conf_ok, conf_msg))
+
+        runner = self._test_runner or self.run_test_suite
+        tests_ok, tests_msg = await runner()
+        checks.append(("test_suite", tests_ok, tests_msg))
 
         all_passed = all(ok for _, ok, _ in checks)
         needs_review = self.requires_human_review(candidate)
@@ -125,6 +133,52 @@ class SafetyGate:
             checks=tuple(checks),
             requires_human_review=needs_review,
         )
+
+    async def run_test_suite(self) -> tuple[bool, str]:
+        """Run the project test suite via ``pytest`` as a subprocess.
+
+        Returns ``(passed, message)``.  ``passed`` is True only when pytest
+        exits 0 within the configured timeout.  Errors, non-zero exits, and
+        timeouts all return ``(False, …)`` (fail-closed).
+        """
+        python = sys.executable
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                python,
+                "-m",
+                "pytest",
+                "--tb=short",
+                "-q",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=self._test_suite_timeout,
+            )
+        except TimeoutError:
+            logger.warning("test suite timed out timeout=%.0fs", self._test_suite_timeout)
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            return False, f"test suite timed out ({self._test_suite_timeout:.0f}s)"
+        except OSError as exc:
+            logger.warning("test suite failed to launch error=%s", exc)
+            return False, f"test suite launch error: {exc}"
+
+        exit_code = proc.returncode or 0
+        stdout = (stdout_bytes or b"").decode(errors="replace")
+        stderr = (stderr_bytes or b"").decode(errors="replace")
+        detail = (stdout + stderr).strip()
+        if exit_code != 0:
+            tail = detail[-300:] if len(detail) > 300 else detail
+            logger.warning(
+                "test suite failed exit_code=%d tail=%s",
+                exit_code,
+                tail,
+            )
+        return exit_code == 0, f"pytest exit_code={exit_code}"
 
     def check_size_limit(self, candidate: MutationCandidate) -> tuple[bool, str]:
         """Check that mutated text is not excessively larger than original."""

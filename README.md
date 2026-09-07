@@ -46,6 +46,39 @@ Every change shipped with tests + CI-green across Python 3.11 / 3.12 / 3.13.
 **Platform docs:** Windows users should read [`docs/quickstart_windows.md`](docs/quickstart_windows.md) for
 platform-specific setup (Miniconda, `PYTHONIOENCODING`, WSL for SWE-bench).
 
+## What's new in this wave
+
+Session continuity, parallel batch work, and a faster TUI.
+
+| Command / flag | What it does |
+|---|---|
+| `godspeed --continue` | Resume the most recent conversation. |
+| `godspeed --resume <id>` | Resume a specific session by ID. |
+| `godspeed list-sessions` | List recent sessions (id, started, summary). |
+| `godspeed mcp add/list/remove` | Manage MCP servers from the CLI (stdio or SSE). |
+| `/compact [instructions]` | Manually compact the conversation, with optional guidance. |
+| `/verify [instructions]` | Build, launch, and probe the project; prints a PASS/FAIL verdict. |
+| `/btw <question>` | Ask a side question without touching the main conversation. |
+| `/goal [text or clear]` | Set, show, or clear the session goal (shown in the HUD). |
+| `/rewind` | Rewind picker: restore conversation, files, or checkpoints. |
+| `/batch [units=N] <goal>` | Decompose a task into parallel worktree units. |
+| `/usage [tools or agents]` | Show session usage breakdown (tokens, tools, sub-agents). |
+| `/effort low|medium|high` | Set reasoning effort for the session's LLM calls. |
+| `/code-review [--fix]` | Review the working-tree diff for bugs and cleanups; --fix queues an agent fix pass. |
+| `/security-review` | Security scan: deterministic secrets detection plus LLM review. |
+| `/simplify` | Cleanup-only review: dead code, duplication, naming. |
+| `/loop [interval] <prompt>` | Re-dispatch a prompt on a recurring interval (e.g. `/loop 5m check status`). |
+| `/fork [label]` | Duplicate the session for later resume (`godspeed --resume <fork-id>`). |
+| `Ctrl-R` | Reverse-search past prompts (persistent history in `.godspeed/history`). |
+| `godspeed batch --open-pr` | Open a GitHub PR per successful worktree unit (requires gh CLI). |
+| `Ctrl+Q` | Queue the current input instead of submitting it. |
+| `!cmd` / `!!cmd` | Run a shell command directly, bypassing the LLM (foreground / background). |
+| `Esc Esc` | Open the rewind picker. |
+| `:img <path>` / `@image=<path>` | Attach an image to the next message. |
+| `statusline.enabled/template` | Customize the per-turn HUD (model, tokens, cost, branch). |
+
+Plan mode now ends through an explicit approval gate: the agent calls `exit_plan_mode`, you approve or reject the plan, and rejection feeds guidance back so the model can revise. New modules back these features: `tools/runtime_verify.py` (build/launch/probe verdicts), `agent/aside.py` (side questions), `agent/batch.py` (worktree batches), `tui/rewind.py` (rewind picker), `observability/usage_report.py` (usage breakdown), and `context/lsp_feedback.py`.
+
 ## The Problem
 
 Every AI agent that touches your codebase — Claude Code, Cursor, Hermes, your custom agent — can read files, write code, and run shell commands. Most do not ship with a cryptographically verifiable record of what they actually did. Most do not fail closed by default when a tool call is ambiguous. Most do not catch secrets before they reach the model.
@@ -92,7 +125,7 @@ Use it standalone as a CLI coding agent, or plug it into your existing agent sta
 - **Cross-agent project instructions** -- loads `GODSPEED.md`, `AGENTS.md` (Linux Foundation standard), `CLAUDE.md`, and `.cursorrules`. Zero-friction migration from any agent.
 - **Token cost tracking** -- real-time token usage and estimated cost per session. `/stats` command. Supports 20+ model pricing tiers. Local models always show "free".
 - **Prompt caching** -- system prompt marked with `cache_control` for Anthropic/OpenAI. ~50% cost reduction on repeated prefixes.
-- **Headless/CI mode** -- `godspeed run` for non-interactive execution. Task from positional arg, `--prompt-file`, or stdin. `--timeout N` wall-clock cap. Differentiated exit codes (0 success, 1 tool error, 2 max iterations, 3 budget, 4 LLM error, 5 invalid input, 6 timeout, 130 interrupt) for pipeline orchestration. JSON output includes `exit_reason`, `iterations_used`, `tool_calls`, `cost_usd`, `duration_seconds`, `audit_log_path`. Audit trail is written by default.
+- **Headless/CI mode** -- `godspeed run` for non-interactive execution. Task from positional arg, `--prompt-file`, or stdin. `--timeout N` wall-clock cap. Differentiated exit codes (0 success, 1 tool error, 2 max iterations, 3 budget, 4 LLM error, 5 invalid input, 6 timeout, 130 interrupt) for pipeline orchestration. JSON output includes `exit_reason`, `iterations_used`, `tool_calls`, `cost_usd`, `duration_seconds`, `audit_log_path`. Audit trail is written by default. A ready-made GitHub Actions workflow (`.github/workflows/godspeed-review.yml`) runs a deterministic secrets scan plus optional LLM code review on every PR.
 - **Web tools** -- `web_search` (DuckDuckGo, no API key) and `web_fetch` (HTML-to-text extraction) let the agent look up documentation and error messages.
 - **Multi-language verify** -- auto-verification after edits supports Python (ruff), JS/TS (biome/eslint), Go (go vet), Rust (cargo check), C/C++ (clang-tidy). Lint-fix retry loop up to 3 rounds.
 - **Test runner** -- auto-detect pytest, jest, vitest, go test, cargo test. Run targeted or full test suites. Agent-accessible for edit-test-fix loops.
@@ -299,6 +332,8 @@ The agent will read your code, answer questions, write files, and run commands -
 | `/remember [action] [pattern]` | Persist a permission rule (approve/deny/ask) |
 | `/extend [N]` | Set max iterations per turn (default: 50) |
 | `/context` | Show context window usage (tokens, percentage) |
+| `/compact [instructions]` | Manually compact the conversation, with optional guidance |
+| `/rewind` | Rewind picker: restore conversation, files, or checkpoints |
 | `/plan` | Toggle plan mode (read-only, explore and plan only) |
 | `/architect` | Toggle architect mode (plan with read-only tools, then execute) |
 | `/think [budget]` | Toggle extended thinking for Claude models |
@@ -310,6 +345,15 @@ The agent will read your code, answer questions, write files, and run commands -
 | `/pause` | Pause the agent loop at next iteration |
 | `/resume` | Resume a paused agent loop |
 | `/guidance <msg>` | Inject guidance and resume paused agent |
+| `/verify [instructions]` | Build, launch, and probe the project; prints a PASS/FAIL verdict |
+| `/btw <question>` | Ask a side question without touching the main conversation |
+| `/goal [text or clear]` | Set, show, or clear the session goal (shown in the HUD) |
+| `/batch [units=N] <goal>` | Decompose a task into parallel worktree units |
+| `/usage [tools or agents]` | Show session usage breakdown (tokens, tools, sub-agents) |
+| `/effort low|medium|high` | Set reasoning effort for the session's LLM calls |
+| `/code-review [--fix]` | Review the working-tree diff for bugs and cleanups |
+| `/security-review` | Secrets scan plus LLM security review of the diff |
+| `/simplify` | Cleanup-only diff review |
 | `/stats` | Show token usage and estimated cost |
 | `/export [name]` | Export conversation as markdown |
 | `/quit` | Exit Godspeed |

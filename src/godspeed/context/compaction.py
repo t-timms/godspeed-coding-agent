@@ -1,10 +1,13 @@
-"""Conversation compaction — graduated 5-stage compaction ladder.
+"""Conversation compaction — graduated compaction ladder.
 
-Stage 1 (75%): budget_reduction — drop verbose tool outputs, keep structure
-Stage 2 (60%): snip — remove low-signal turns, keep decisions + tool calls
-Stage 3 (45%): microcompact — collapse tool call runs to GCG summaries
-Stage 4 (30%): context_collapse — keep only tool call metadata + GCG refs
-Stage 5 (15%): auto_compact — emergency LLM summarization (existing behavior)
+Deterministic stages (applied by ``GraduatedCompactor.apply_stages``):
+  Stage 1 (75%): budget_reduction — drop verbose tool outputs, keep structure
+  Stage 2 (60%): snip — remove low-signal turns, keep decisions + tool calls
+  Stage 3 (45%): microcompact — collapse tool call runs to GCG summaries
+  Stage 4 (30%): context_collapse — keep only tool call metadata + GCG refs
+
+Async LLM stage (invoked separately via ``emergency_compact``):
+  Stage 5 (15%): auto_compact — emergency LLM summarization
 
 GCG node IDs survive ALL stages. Content does not.
 """
@@ -24,6 +27,58 @@ logger = logging.getLogger(__name__)
 
 SMALL_CONTEXT_THRESHOLD = 32_768
 LARGE_CONTEXT_THRESHOLD = 100_000
+
+# Stage 2 signal-score threshold: messages scoring >= this are preserved.
+# Tuned so short acknowledgements ("ok", "done") are dropped but
+# planning discussions, questions, and code blocks survive.
+SIGNAL_SCORE_THRESHOLD: float = 1.5
+
+_DECISION_LEXICON: frozenset[str] = frozenset(
+    {
+        "decided",
+        "decision",
+        "approach",
+        "proposal",
+        "plan",
+        "strategy",
+        "design",
+        "architecture",
+        "pattern",
+        "factory",
+        "singleton",
+        "adapter",
+        "refactor",
+        "instead",
+        "trade-off",
+        "tradeoff",
+        "consider",
+        "propose",
+        "alternative",
+        "suggest",
+        "recommend",
+        "rationale",
+        "because",
+        "option",
+        "consensus",
+        "agree",
+        "disagree",
+        "concern",
+    }
+)
+
+
+def _signal_score(content: str) -> float:
+    """Multi-signal information-density score for Stage 2 compaction decisions."""
+    if not content:
+        return 0.0
+    score = 0.0
+    score += min(len(content) / 1_000, 2.0)
+    score += content.count("```") * 1.5
+    lower = content.lower()
+    score += sum(1.0 for word in _DECISION_LEXICON if word in lower)
+    score += content.count("?") * 0.5
+    return score
+
 
 COMPACTION_PROMPT_SMALL = """\
 Aggressively summarize this coding agent conversation.
@@ -152,14 +207,7 @@ def _remove_low_signal_turns(ctx: CompactionContext) -> list[dict[str, Any]]:
                 result.append(msg)
             else:
                 content = msg.get("content", "")
-                # Keep if it looks like a decision or contains key info
-                if content and (
-                    "fix" in content.lower()
-                    or "change" in content.lower()
-                    or "modify" in content.lower()
-                    or "implement" in content.lower()
-                    or "error" in content.lower()
-                ):
+                if content and _signal_score(content) >= SIGNAL_SCORE_THRESHOLD:
                     result.append(msg)
                 else:
                     continue
@@ -311,6 +359,12 @@ def _build_gcg_summary(
 
 # ── Stage ladder ───────────────────────────────────────────────────────────
 
+STAGE_BUDGET_REDUCTION: int = 0
+STAGE_SNIP: int = 1
+STAGE_MICROCOMPACT: int = 2
+STAGE_CONTEXT_COLLAPSE: int = 3
+EMERGENCY_STAGE_IDX: int = 4
+
 COMPACTION_STAGES: list[CompactionStage] = [
     CompactionStage(
         name="budget_reduction",
@@ -336,20 +390,14 @@ COMPACTION_STAGES: list[CompactionStage] = [
         preserves=["gcg_refs"],
         strategy=_keep_metadata_only,
     ),
-    CompactionStage(
-        name="auto_compact",
-        threshold_pct=0.15,
-        preserves=[],
-        strategy=_keep_metadata_only,  # Fallback; LLM compaction handled separately
-    ),
 ]
 
 
 class GraduatedCompactor:
-    """Orchestrates the 5-stage graduated compaction ladder.
+    """Orchestrates the graduated compaction ladder.
 
-    Tracks the last stage applied and context usage thresholds.
-    Integrates with GCG for context summary references.
+    Deterministic stages 0-3 are applied via ``apply_stages``.
+    Stage 4 (auto_compact) is async and handled by ``emergency_compact``.
 
     Args:
         stages: List of compaction stages. Defaults to COMPACTION_STAGES.
@@ -364,6 +412,7 @@ class GraduatedCompactor:
         self._stages = stages or COMPACTION_STAGES
         self.gcg = gcg
         self._last_stage_idx: int = -1
+        self._failed_stages: set[int] = set()
         self._context_pct: float = 0.0
 
     @property
@@ -374,6 +423,7 @@ class GraduatedCompactor:
     def reset(self) -> None:
         """Reset compaction state for a new session."""
         self._last_stage_idx = -1
+        self._failed_stages: set[int] = set()
         self._context_pct = 0.0
 
     def get_stage_for_context(self, token_count: int, max_tokens: int) -> int:
@@ -418,18 +468,18 @@ class GraduatedCompactor:
         )
 
         for i in range(self._last_stage_idx + 1, target_idx + 1):
+            if i in self._failed_stages:
+                continue
             stage = self._stages[i]
             try:
                 new_messages = stage.strategy(ctx)
                 before_count = len(ctx.messages)
                 after_count = len(new_messages)
 
-                # Apply the compaction to conversation messages
-                conversation._messages = new_messages
-                conversation._invalidate_caches()
+                conversation.replace_messages(new_messages)
 
                 ctx.messages = new_messages
-                self._last_stage_idx = i
+                self._last_stage_idx = max(self._last_stage_idx, i)
 
                 results.append(
                     CompactionResult(
@@ -450,6 +500,7 @@ class GraduatedCompactor:
                 )
             except Exception as exc:
                 logger.warning("Compaction stage %s failed: %s", stage.name, exc)
+                self._failed_stages.add(i)
 
         return results
 
@@ -470,9 +521,8 @@ class GraduatedCompactor:
             gcg=self.gcg,
         )
         new_messages = await _llm_emergency_summarize(ctx, llm_client, model)
-        conversation._messages = new_messages
-        conversation._invalidate_caches()
-        self._last_stage_idx = 4
+        conversation.replace_messages(new_messages)
+        self._last_stage_idx = max(self._last_stage_idx, EMERGENCY_STAGE_IDX)
 
         logger.info("Emergency compaction messages=%d→%d", before, len(new_messages))
         return CompactionResult(
@@ -544,3 +594,76 @@ async def compact_if_needed(
     except Exception as exc:
         logger.error("Compaction failed: %s", exc, exc_info=True)
         return False
+
+
+async def compact_now(
+    conversation: Conversation,
+    llm_client: LLMClient,
+    model: str | None = None,
+    instructions: str = "",
+) -> CompactionResult:
+    """Force an immediate LLM-based compaction of the conversation.
+
+    Unlike :func:`compact_if_needed`, this always compacts regardless of the
+    context threshold. Optional *instructions* guide what the compaction
+    summary preserves — they are prepended as a line in the summary prompt
+    (the existing compaction call does not accept instructions directly).
+
+    Args:
+        conversation: The conversation to compact.
+        llm_client: LLM client for the summarization call.
+        model: Model name for selecting the compaction prompt.
+        instructions: Optional guidance for what the summary should preserve.
+
+    Returns:
+        A :class:`CompactionResult` describing the compaction attempt.
+    """
+    model_name = model or getattr(llm_client, "model", "")
+    prompt = get_compaction_prompt(model_name) if model_name else COMPACTION_PROMPT_MEDIUM
+
+    messages_before = len(conversation._messages)
+    tokens_before = conversation.token_count
+
+    logger.info(
+        "Manual compaction triggered tokens=%d messages=%d model=%s",
+        tokens_before,
+        messages_before,
+        model_name,
+    )
+
+    context = conversation.get_compaction_context()
+    if instructions:
+        context = f"[User instructions for summary: {instructions}]\n\n{context}"
+
+    summary_messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": context},
+    ]
+
+    try:
+        response = await llm_client.chat(messages=summary_messages, task_type="compaction")
+        conversation.compact(response.content)
+        logger.info(
+            "Manual compaction complete messages=%d→%d new_tokens=%d",
+            messages_before,
+            len(conversation._messages),
+            conversation.token_count,
+        )
+        return CompactionResult(
+            stage_name="manual_compact",
+            messages_before=messages_before,
+            messages_after=len(conversation._messages),
+            tokens_before=tokens_before,
+            tokens_after=conversation.token_count,
+            applied=True,
+        )
+    except Exception as exc:
+        logger.error("Manual compaction failed: %s", exc, exc_info=True)
+        return CompactionResult(
+            stage_name="manual_compact",
+            messages_before=messages_before,
+            messages_after=len(conversation._messages),
+            tokens_before=tokens_before,
+            tokens_after=conversation.token_count,
+            applied=False,
+        )

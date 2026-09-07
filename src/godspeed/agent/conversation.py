@@ -167,6 +167,42 @@ class Conversation:
                     parts.append(f"[tool_call]: {fn.get('name', '?')}({fn.get('arguments', '')})")
         return "\n".join(parts)
 
+    def replace_messages(self, new_messages: list[dict[str, Any]]) -> None:
+        """Atomically replace the internal message list.
+
+        This is the sanctioned way for external code (e.g. compaction) to
+        swap the message list without reaching into ``_messages`` directly.
+
+        Args:
+            new_messages: The new message list to replace the current one.
+        """
+        self._messages = [dict(m) for m in new_messages]
+        self._invalidate_caches()
+
+    def restore_messages(self, messages: list[dict[str, Any]]) -> None:
+        """Restore a previously persisted conversation (excluding system prompt).
+
+        Replaces the current message history with the given messages. Used by
+        session resume to bring back a prior conversation verbatim.
+
+        Args:
+            messages: The message list to restore (system prompt excluded).
+        """
+        self._messages = [dict(m) for m in messages]
+        self._invalidate_caches()
+
+    def add_system_message(self, content: str) -> None:
+        """Inject an additional system message into the conversation.
+
+        Used to bootstrap resumed sessions with a summary marker (e.g.
+        ``[resumed: <id>]``) when the full message history is unavailable.
+
+        Args:
+            content: The system message content to append.
+        """
+        self._messages.append({"role": "system", "content": content})
+        self._invalidate_caches()
+
     def clear(self) -> None:
         """Clear all messages (keeps system prompt)."""
         self._messages.clear()

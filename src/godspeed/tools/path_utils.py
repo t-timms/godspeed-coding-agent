@@ -17,6 +17,11 @@ def resolve_tool_path(file_path: str, cwd: Path) -> Path:
     Raises:
         ValueError: If the resolved path is outside the project directory.
     """
+    # NT device / long-prefix paths (\\.\PhysicalDrive0, \\?\C:\...) are
+    # never legitimate tool targets — reject before any resolution.
+    if str(file_path).startswith(("\\\\.", "\\\\?\\")):
+        raise ValueError(f"Access denied: NT device paths are not permitted: '{file_path}'")
+
     # On non-Windows platforms, defensively reject Windows drive-letter paths
     # that can never be inside the project directory.
     if os.name != "nt" and re.match(r"^[A-Za-z]:[\\\/]", str(file_path)):

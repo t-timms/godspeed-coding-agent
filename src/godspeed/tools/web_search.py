@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+from godspeed.tools.base import WEB_CALL_SESSION_CAP, RiskLevel, Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,10 @@ class WebSearchTool(Tool):
 
         if not isinstance(query, str) or not query.strip():
             return ToolResult.failure("query must be a non-empty string")
+
+        context.web_call_count += 1
+        if context.web_call_count > WEB_CALL_SESSION_CAP:
+            return ToolResult.failure(f"Session web-call cap ({WEB_CALL_SESSION_CAP}) reached")
 
         max_results = min(max_results, 15)
 

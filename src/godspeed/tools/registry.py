@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from godspeed.tools.base import Tool, ToolCall, ToolContext, ToolResult
+from godspeed.tools.base import RiskLevel, Tool, ToolCall, ToolContext, ToolResult
+
+if TYPE_CHECKING:
+    from godspeed.sandbox.policy import SandboxPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +29,8 @@ _TRANSIENT_ERROR_PATTERNS = (
     "503",
     "504",
 )
+
+_SANDBOX_LOW_RISK_TOOLS = frozenset({"file_write", "file_edit", "file_move", "git", "diff_apply"})
 
 
 def _validate_tool_arguments(tool: Tool, arguments: dict[str, Any]) -> str | None:
@@ -81,11 +86,12 @@ class ToolRegistry:
     retry on transient failures.
     """
 
-    def __init__(self, max_retries: int = 2) -> None:
+    def __init__(self, max_retries: int = 2, sandbox: SandboxPolicy | None = None) -> None:
         self._tools: dict[str, Tool] = {}
         self._description_overrides: dict[str, str] = {}  # tool_name -> override
         self._schema_cache: list[dict[str, Any]] | None = None
         self._max_retries = max_retries  # retries beyond the initial attempt
+        self._sandbox = sandbox
 
     def register(self, tool: Tool) -> None:
         """Register a tool. Raises ValueError on duplicate names."""
@@ -197,6 +203,16 @@ class ToolRegistry:
             return ToolResult.failure(
                 f"Invalid arguments for '{tool_call.tool_name}': {validation_error}"
             )
+
+        if self._sandbox is not None and (
+            tool.risk_level in (RiskLevel.HIGH, RiskLevel.DESTRUCTIVE)
+            or (tool.risk_level == RiskLevel.LOW and tool.name in _SANDBOX_LOW_RISK_TOOLS)
+        ):
+            from godspeed.sandbox.policy import evaluate_sandbox
+
+            sandbox_result = evaluate_sandbox(tool_call, self._sandbox)
+            if not sandbox_result.sandbox_ok:
+                return ToolResult.failure(f"Sandbox denied: {sandbox_result.reason}")
 
         # Execute with retry on transient failures
         last_error: Exception | None = None

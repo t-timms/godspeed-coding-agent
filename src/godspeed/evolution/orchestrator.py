@@ -201,7 +201,7 @@ class EvolutionOrchestrator:
                     continue
 
                 # 4. Safety gate
-                verdict = self._safety.gate(candidate, score)
+                verdict = await self._safety.gate(candidate, score)
                 record_id = self._registry.register(candidate, score, verdict)
 
                 if not verdict.passed:

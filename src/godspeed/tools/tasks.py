@@ -76,6 +76,25 @@ class TaskStore:
         return "\n".join(lines)
 
 
+def build_continuation_nudge(tasks: list[Task]) -> str | None:
+    """Build a continuation nudge for the model when tasks remain open.
+
+    Returns a short instruction telling the model to keep working through its
+    open tasks, or ``None`` when every task is completed (or there are no
+    tasks). Pure and unit-testable — the agent loop injects the result into
+    the model's context before each LLM call.
+    """
+    active = [t for t in tasks if t.status != "completed"]
+    if not active:
+        return None
+
+    lines = [f"- [{t.id}] {t.title} ({t.status})" for t in active]
+    return (
+        "You still have open tasks. Continue working through them before stopping:\n"
+        + "\n".join(lines)
+    )
+
+
 class TaskTool(Tool):
     """Tool for creating and managing tasks during an agent session."""
 

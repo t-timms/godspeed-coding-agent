@@ -10,21 +10,18 @@ from godspeed.hooks import HookEvent
 class HookDefinition(BaseModel):
     """A single hook that runs a shell command at a lifecycle event.
 
-    Events (27 total):
-        Session: session_start, session_end, turn_end
-        Permission: pre_permission_check, post_permission_check,
-            permission_denied, permission_granted
-        Tool: pre_tool_call, post_tool_call, tool_error, tool_retry
-        File: pre_file_write, post_file_write, pre_file_read
+    Events (25 total):
+        Session: session_start, session_end
+        Permission: pre_permission_check, post_permission_check, permission_denied
+        Tool: pre_tool_call, post_tool_call
         Context: pre_compaction, post_compaction, context_threshold_75,
             context_threshold_50, context_threshold_25
-        Subagent: pre_subagent_spawn, post_subagent_complete, subagent_error
-        Evolution: pre_evolution_run, post_evolution_run
+        Subagent: pre_subagent_spawn, post_subagent_complete, post_subagent_stop,
+            subagent_error
         Safety: secret_detected, dangerous_command, stuck_loop_detected,
             budget_exceeded
-        Audit: audit_write
-        Graph: post_graph_build
         Workflow: workflow_phase_complete, workflow_complete, workflow_rejected
+        Misc: stop, notification
 
     Template variables in ``command``:
         {tool_name}: Name of the tool being called (tool events only).
@@ -48,4 +45,11 @@ class HookDefinition(BaseModel):
         ge=1,
         le=300,
         description="Max seconds for hook execution.",
+    )
+    source: str = Field(
+        default="",
+        description=(
+            "Provenance of this hook: empty = user settings (trusted); "
+            "otherwise the config file path it was loaded from."
+        ),
     )

@@ -232,6 +232,12 @@ class FileEditTool(Tool):
                     f"Edit rejected by reviewer for {file_path_str} — no changes written."
                 )
 
+        # Before-edit checkpoint: snapshot the on-disk original so the edit
+        # is reversible via edit_checkpoints.restore_latest.
+        from godspeed.tools.edit_checkpoints import snapshot_file
+
+        snapshot_file(resolved, context.cwd, context.session_id)
+
         # Atomic write
         fd, tmp_path = tempfile.mkstemp(suffix=resolved.suffix, dir=str(resolved.parent))
         try:

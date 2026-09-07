@@ -16,7 +16,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from godspeed.security.secrets import redact_secrets
+
 logger = logging.getLogger(__name__)
+
+
+def _redact(value: Any) -> Any:
+    """Recursively redact secret-bearing strings in a log record."""
+    if isinstance(value, str):
+        return redact_secrets(value)
+    if isinstance(value, dict):
+        return {key: _redact(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    return value
 
 
 class ConversationLogger:
@@ -113,6 +126,8 @@ class ConversationLogger:
         duration_seconds: float,
         cost_usd: float,
         must_fix_injections: int = 0,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         """Terminal record per session.
 
@@ -125,19 +140,22 @@ class ConversationLogger:
         triggered many fix-required injections are less efficient per unit
         of successful work.
         """
-        self._write(
-            {
-                "role": "session_end",
-                "exit_reason": exit_reason,
-                "exit_code": exit_code,
-                "iterations_used": iterations_used,
-                "tool_call_count": tool_call_count,
-                "tool_error_count": tool_error_count,
-                "must_fix_injections": must_fix_injections,
-                "duration_seconds": round(duration_seconds, 3),
-                "cost_usd": round(cost_usd, 6),
-            }
-        )
+        record = {
+            "role": "session_end",
+            "exit_reason": exit_reason,
+            "exit_code": exit_code,
+            "iterations_used": iterations_used,
+            "tool_call_count": tool_call_count,
+            "tool_error_count": tool_error_count,
+            "must_fix_injections": must_fix_injections,
+            "duration_seconds": round(duration_seconds, 3),
+            "cost_usd": round(cost_usd, 6),
+        }
+        if lines_added is not None:
+            record["lines_added"] = lines_added
+        if lines_removed is not None:
+            record["lines_removed"] = lines_removed
+        self._write(record)
 
     def close(self) -> None:
         """Flush and close the underlying file."""
@@ -169,7 +187,13 @@ class ConversationLogger:
     # -- internals -----------------------------------------------------------
 
     def _write(self, record: dict[str, Any]) -> None:
-        """Serialize one record as a JSON line and flush."""
+        """Serialize one record as a JSON line and flush.
+
+        String values are passed through the secrets redactor first:
+        conversation logs can embed tool output, which may contain
+        credentials. Redaction here keeps the training corpus safe to
+        store and share.
+        """
         record["timestamp"] = datetime.now(tz=UTC).isoformat()
         record["session_id"] = self._session_id
 
@@ -177,7 +201,7 @@ class ConversationLogger:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(self._path, "a", encoding="utf-8")  # noqa: SIM115
 
-        line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+        line = json.dumps(_redact(record), ensure_ascii=False, separators=(",", ":"))
         self._file.write(line + "\n")
         self._writes_since_flush += 1
         if self._writes_since_flush >= self._FLUSH_INTERVAL:

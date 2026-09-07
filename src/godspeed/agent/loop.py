@@ -24,8 +24,11 @@ from godspeed.hooks import HookEvent
 from godspeed.llm.client import ChatResponse, LLMClient
 from godspeed.llm.router import classify_task_type
 from godspeed.observability.metrics import LoopMetrics, MetricsSink
+from godspeed.security.dangerous import detect_dangerous_command
+from godspeed.security.secrets import detect_secrets
 from godspeed.tools.base import ToolCall, ToolContext, ToolResult
 from godspeed.tools.registry import ToolRegistry
+from godspeed.tools.tasks import build_continuation_nudge
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,19 @@ def _strip_meta_commentary(text: str) -> str:
     return text.strip()
 
 
+def _last_message_is_nudge(messages: list[dict[str, Any]], nudge: str) -> bool:
+    """Return True when the last message is already the given nudge.
+
+    Guards against re-injecting the same nudge on consecutive iterations —
+    the model may legitimately respond to the nudge with a tool call, and we
+    don't want to stack duplicate nudges in the conversation.
+    """
+    if not messages:
+        return False
+    last = messages[-1]
+    return last.get("role") == "user" and last.get("content") == nudge
+
+
 # Callback type aliases for clarity
 OnAssistantText = Callable[[str], None]
 OnToolCall = Callable[[str, dict[str, Any]], None]
@@ -128,6 +144,7 @@ class _LoopState:
     competition_mode: bool = False
     llm_max_retries: int = 3
     llm_retry_delay: float = 2.0
+    overflow_compacted: bool = False
     budget_verify_cap: int = 3
 
 
@@ -167,6 +184,7 @@ async def agent_loop(
     llm_max_retries: int = 3,
     llm_retry_delay: float = 2.0,
     budget_verify_cap: int = 3,
+    task_store: Any | None = None,
 ) -> str:
     """Run the agent loop until the model stops calling tools.
 
@@ -204,6 +222,8 @@ async def agent_loop(
             iteration boundary. The TUI binds Ctrl+C to set this event.
         parallel_tool_calls: Execute multiple tool calls concurrently when True
             (default). Falls back to sequential when False or for single calls.
+        task_store: Optional TaskStore whose open tasks drive a continuation
+            nudge injected into the model's context before each LLM call.
 
     Returns:
         The final assistant text response.
@@ -284,6 +304,13 @@ async def agent_loop(
         # via settings.routing (or the cheap_model/strong_model shortcuts).
         task_type = classify_task_type(conversation.messages)
 
+        # Continuation nudge: if the task store has open tasks, remind the
+        # model to keep working through them before it decides to stop.
+        if task_store is not None:
+            nudge = build_continuation_nudge(task_store.list_all())
+            if nudge is not None and not _last_message_is_nudge(conversation.messages, nudge):
+                conversation.add_user_message(nudge)
+
         # Call LLM (streaming or batch) with retry for transient errors
         llm_t0 = time.monotonic()
         response: ChatResponse | None = None
@@ -340,6 +367,23 @@ async def agent_loop(
                         metrics.iterations_used = iteration
                         metrics.finalize(ExitReason.BUDGET_EXCEEDED)
                     return msg
+                if _is_context_overflow(exc) and not state.overflow_compacted:
+                    state.overflow_compacted = True
+                    logger.warning(
+                        "Context overflow at iteration=%d — compacting and retrying once",
+                        iteration,
+                    )
+                    max_toks = conversation.max_tokens
+                    toks = max(conversation.token_count, max_toks)
+                    if graduated_compactor is not None:
+                        graduated_compactor.apply_stages(conversation, toks, max_toks)
+                        await graduated_compactor.emergency_compact(
+                            conversation, llm_client, getattr(llm_client, "model", "")
+                        )
+                    else:
+                        await _compact_conversation(conversation, llm_client)
+                    loop_metrics.record_compaction()
+                    continue
                 last_exc = exc
                 if llm_attempt < state.llm_max_retries:
                     delay = state.llm_retry_delay * (2**llm_attempt)
@@ -431,15 +475,29 @@ async def agent_loop(
             async def _eval_one(tc: ToolCall) -> ToolCall | None:
                 if tool_context.permissions is not None:
                     if hook_executor is not None:
-                        await asyncio.get_running_loop().run_in_executor(
-                            None,
-                            functools.partial(
-                                hook_executor.fire,
-                                HookEvent.PRE_PERMISSION_CHECK,
-                                tool_name=tc.tool_name,
-                                args=tc.arguments,
-                            ),
-                        )
+                        serialized_args = json.dumps(tc.arguments, default=str)
+                        if tc.tool_name == "shell" and detect_dangerous_command(
+                            str(tc.arguments.get("command", ""))
+                        ):
+                            await asyncio.get_running_loop().run_in_executor(
+                                None,
+                                functools.partial(
+                                    hook_executor.fire,
+                                    HookEvent.DANGEROUS_COMMAND,
+                                    tool=tc.tool_name,
+                                    pattern=str(tc.arguments.get("command", ""))[:200],
+                                ),
+                            )
+                        if detect_secrets(serialized_args):
+                            await asyncio.get_running_loop().run_in_executor(
+                                None,
+                                functools.partial(
+                                    hook_executor.fire,
+                                    HookEvent.SECRET_DETECTED,
+                                    tool=tc.tool_name,
+                                    pattern="arguments",
+                                ),
+                            )
                     if inspect.iscoroutinefunction(tool_context.permissions.evaluate):
                         decision = await tool_context.permissions.evaluate(tc)
                     else:
@@ -607,44 +665,53 @@ async def _dispatch_parallel(
     """
     from godspeed.tools.base import RiskLevel
 
-    # Partition into read-only (parallel-safe) and write (serial) groups
-    read_only_calls: list[ToolCall] = []
-    write_calls: list[ToolCall] = []
-    for tc in permitted:
+    def _is_concurrency_safe(tc: ToolCall) -> bool:
         tool = tool_registry.get(tc.tool_name)
-        if tool is not None and tool.risk_level == RiskLevel.READ_ONLY:
-            read_only_calls.append(tc)
-        else:
-            write_calls.append(tc)
+        if tool is None:
+            return False
+        return bool(getattr(tool, "concurrency_safe", tool.risk_level == RiskLevel.READ_ONLY))
 
-    all_calls = read_only_calls + write_calls
+    all_calls = list(permitted)
     if on_parallel_start:
         on_parallel_start([(tc.tool_name, tc.arguments) for tc in all_calls])
 
     t0 = time.monotonic()
-    parallel_results: list[ToolResult] = []
-    if read_only_calls:
+    results: list[ToolResult] = []
+    batch: list[ToolCall] = []
+
+    async def _flush_batch() -> None:
+        if not batch:
+            return
+        sem = asyncio.Semaphore(10)
+
+        async def _run(tc: ToolCall) -> ToolResult:
+            async with sem:
+                return await tool_registry.dispatch(tc, tool_context)
+
         coros = []
-        for tc in read_only_calls:
-            cached_task = state.speculative_cache.pop(tc.call_id, None)
+        for c in batch:
+            cached_task = state.speculative_cache.pop(c.call_id, None)
             if cached_task is not None:
-                logger.debug("Speculative hit tool=%s call_id=%s", tc.tool_name, tc.call_id)
+                logger.debug("Speculative hit tool=%s call_id=%s", c.tool_name, c.call_id)
                 if metrics is not None:
                     metrics.loop.record_speculative_hit()
                 coros.append(cached_task)
             else:
                 if metrics is not None:
                     metrics.loop.record_speculative_miss()
-                coros.append(asyncio.create_task(tool_registry.dispatch(tc, tool_context)))
-        parallel_results = await asyncio.gather(*coros)
+                coros.append(_run(c))
+        results.extend(await asyncio.gather(*coros))
+        batch.clear()
 
-    serial_results: list[ToolResult] = []
-    for tc in write_calls:
+    for tc in all_calls:
+        if _is_concurrency_safe(tc):
+            batch.append(tc)
+            continue
+        await _flush_batch()
         _check_cancel(cancel_event)
-        result = await tool_registry.dispatch(tc, tool_context)
-        serial_results.append(result)
+        results.append(await tool_registry.dispatch(tc, tool_context))
+    await _flush_batch()
 
-    results = parallel_results + serial_results
     permitted_ordered = all_calls
     batch_latency_ms = (time.monotonic() - t0) * 1000
     logger.info(
@@ -928,11 +995,9 @@ async def _post_process_results(
             state.budget_verify_cap,
         )
         conversation.add_user_message(
-            f"You have made {state.consecutive_writes} edits. "
-            "If the fix is correct, STOP NOW and submit. "
-            "If verify/tests still fail after 2 more attempts, submit your "
-            "best effort — a partial fix is better than none at all. "
-            "Do not over-edit or make unnecessary changes."
+            f"You have made {state.consecutive_writes} edits so far. "
+            "When the current change passes verification, submit the result. "
+            "Avoid unnecessary further edits."
         )
 
     if state.auto_commit and state.consecutive_successful_edits >= state.auto_commit_threshold:
@@ -1199,9 +1264,8 @@ async def _drain_background_tasks(
                 )
                 conversation.add_user_message(
                     f"Verify has failed {state.verify_failure_count} times. "
-                    "Submit your best effort now — a partial fix that addresses "
-                    "the core problem is better than endless iteration. "
-                    "STOP editing and declare done."
+                    "Consider whether the core problem is addressed; if so, "
+                    "submit the current state as the result."
                 )
     state.pending_background_tasks = still_pending
 
@@ -1312,6 +1376,24 @@ def _parse_tool_call(raw: dict[str, Any]) -> ToolCall | None:
     except (json.JSONDecodeError, TypeError, KeyError):
         logger.warning("Malformed tool call: %s", raw)
         return None
+
+
+def _is_context_overflow(exc: Exception) -> bool:
+    """Match provider context-overflow errors (the prompt_too_long family)."""
+    if "contextwindowoverflow" in type(exc).__name__.lower():
+        return True
+    text = str(exc).lower()
+    markers = (
+        "prompt_too_long",
+        "prompt is too long",
+        "context_length_exceeded",
+        "context length exceeded",
+        "maximum context length",
+        "too many tokens",
+        "input length exceeds",
+        "reduce the length",
+    )
+    return any(marker in text for marker in markers)
 
 
 async def _check_context_and_compact(
@@ -1496,11 +1578,6 @@ async def _streaming_call(
     if final_response is None:
         # Stream ended without a finish_reason — shouldn't happen but be safe
         return ChatResponse(content="", tool_calls=[], finish_reason="stop", usage={})
-
-    # Track streaming token usage (batch path does this inside LLMClient._call)
-    if final_response.usage:
-        llm_client.total_input_tokens += final_response.usage.get("prompt_tokens", 0)
-        llm_client.total_output_tokens += final_response.usage.get("completion_tokens", 0)
 
     # Speculative execution: start READ_ONLY tools immediately
     if (

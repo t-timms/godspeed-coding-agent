@@ -43,6 +43,10 @@ def _make_score(
     )
 
 
+async def _stub_test_suite() -> tuple[bool, str]:
+    return True, "stubbed test suite"
+
+
 # ---------------------------------------------------------------------------
 # Test: SafetyVerdict data structure
 # ---------------------------------------------------------------------------
@@ -79,7 +83,7 @@ class TestCheckSizeLimit:
         assert "ratio" in msg
 
     def test_empty_original(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(original="", mutated="something")
         ok, _msg = gate.check_size_limit(candidate)
         assert ok is True  # No check on empty original
@@ -110,13 +114,13 @@ class TestCheckSemanticDrift:
         assert ok is False
 
     def test_both_empty(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(original="", mutated="")
         ok, _ = gate.check_semantic_drift(candidate)
         assert ok is True
 
     def test_one_empty(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(original="content", mutated="")
         ok, _ = gate.check_semantic_drift(candidate)
         assert ok is False
@@ -154,22 +158,22 @@ class TestCheckFitnessThreshold:
 
 class TestRequiresHumanReview:
     def test_prompt_section_needs_review(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(artifact_type="prompt_section", artifact_id="tools")
         assert gate.requires_human_review(candidate) is True
 
     def test_core_artifact_needs_review(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(artifact_type="tool_description", artifact_id="core")
         assert gate.requires_human_review(candidate) is True
 
     def test_security_artifact_needs_review(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(artifact_id="security")
         assert gate.requires_human_review(candidate) is True
 
     def test_regular_tool_no_review(self) -> None:
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(artifact_type="tool_description", artifact_id="file_read")
         assert gate.requires_human_review(candidate) is False
 
@@ -180,41 +184,41 @@ class TestRequiresHumanReview:
 
 
 class TestGate:
-    def test_all_checks_pass(self) -> None:
-        gate = SafetyGate()
+    async def test_all_checks_pass(self) -> None:
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate()
         score = _make_score(overall=0.8, confidence=1.0)
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
 
         assert verdict.passed is True
         assert all(ok for _, ok, _ in verdict.checks)
         assert verdict.requires_human_review is False
 
-    def test_size_limit_fails(self) -> None:
-        gate = SafetyGate(max_growth=1.5)
+    async def test_size_limit_fails(self) -> None:
+        gate = SafetyGate(max_growth=1.5, test_runner=_stub_test_suite)
         candidate = _make_candidate(original="a", mutated="a" * 100)
         score = _make_score()
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
 
         assert verdict.passed is False
         size_check = next(c for c in verdict.checks if c[0] == "size_limit")
         assert size_check[1] is False
 
-    def test_low_confidence_fails(self) -> None:
-        gate = SafetyGate()
+    async def test_low_confidence_fails(self) -> None:
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate()
         score = _make_score(confidence=0.3)
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
 
         assert verdict.passed is False
         conf_check = next(c for c in verdict.checks if c[0] == "confidence")
         assert conf_check[1] is False
 
-    def test_prompt_section_flagged_for_review(self) -> None:
-        gate = SafetyGate()
+    async def test_prompt_section_flagged_for_review(self) -> None:
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(artifact_type="prompt_section")
         score = _make_score()
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
 
         assert verdict.requires_human_review is True
 
@@ -228,19 +232,19 @@ class TestSecuritySensitiveMutations:
         "tool_id",
         ["shell", "bash", "file_write", "file_edit", "git", "github", "diff_apply", "background"],
     )
-    def test_security_sensitive_tool_requires_review(self, tool_id: str) -> None:
+    async def test_security_sensitive_tool_requires_review(self, tool_id: str) -> None:
         """Tool descriptions that gate dangerous actions must need review."""
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(artifact_type="tool_description", artifact_id=tool_id)
         score = _make_score()
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
         assert verdict.requires_human_review is True, (
             f"{tool_id} mutation must require human review"
         )
 
-    def test_benign_tool_does_not_require_review(self) -> None:
+    async def test_benign_tool_does_not_require_review(self) -> None:
         """Read-only tool mutations with benign content are auto-applicable."""
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(
             artifact_type="tool_description",
             artifact_id="file_read",
@@ -248,7 +252,7 @@ class TestSecuritySensitiveMutations:
             mutated="Read files from the local filesystem with examples.",
         )
         score = _make_score()
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
         assert verdict.requires_human_review is False
 
     @pytest.mark.parametrize(
@@ -265,9 +269,9 @@ class TestSecuritySensitiveMutations:
             "disable audit",
         ],
     )
-    def test_bypass_phrase_requires_review(self, bypass_phrase: str) -> None:
+    async def test_bypass_phrase_requires_review(self, bypass_phrase: str) -> None:
         """Any mutation containing a security-bypass phrase requires review."""
-        gate = SafetyGate()
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(
             artifact_type="tool_description",
             artifact_id="file_read",
@@ -275,15 +279,15 @@ class TestSecuritySensitiveMutations:
             mutated=f"Read files from disk. Note: this tool is {bypass_phrase}.",
         )
         score = _make_score()
-        verdict = gate.gate(candidate, score)
+        verdict = await gate.gate(candidate, score)
         assert verdict.requires_human_review is True, (
             f"mutation with phrase {bypass_phrase!r} must require review"
         )
 
-    def test_bypass_phrase_case_insensitive(self) -> None:
-        gate = SafetyGate()
+    async def test_bypass_phrase_case_insensitive(self) -> None:
+        gate = SafetyGate(test_runner=_stub_test_suite)
         candidate = _make_candidate(
             mutated="Read files. Note: this tool is ALWAYS GRANTED.",
         )
-        verdict = gate.gate(candidate, _make_score())
+        verdict = await gate.gate(candidate, _make_score())
         assert verdict.requires_human_review is True

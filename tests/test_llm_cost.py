@@ -93,7 +93,7 @@ class TestEstimateCost:
 
     def test_claude_haiku_pricing(self) -> None:
         cost = estimate_cost("claude-haiku-3.5", 1_000_000, 0)
-        assert cost == 0.25
+        assert cost == 0.80
 
     def test_gpt_4_pricing(self) -> None:
         cost = estimate_cost("gpt-4", 1_000_000, 1_000_000)

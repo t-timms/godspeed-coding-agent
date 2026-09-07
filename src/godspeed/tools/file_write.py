@@ -105,6 +105,14 @@ class FileWriteTool(Tool):
                 )
 
         try:
+            # Before-edit checkpoint: snapshot the on-disk original (existing
+            # files only) so the overwrite is reversible via
+            # edit_checkpoints.restore_latest.
+            if resolved.exists():
+                from godspeed.tools.edit_checkpoints import snapshot_file
+
+                snapshot_file(resolved, context.cwd, context.session_id)
+
             # Create parent directories
             resolved.parent.mkdir(parents=True, exist_ok=True)
 

@@ -1,0 +1,85 @@
+﻿name: Godspeed PR Review
+
+# Runs godspeed headlessly on each PR to summarize the diff, flag bugs,
+# and run the deterministic secrets scan. Falls back gracefully when no
+# LLM key is configured (secrets scan still runs).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Godspeed
+        run: uv sync --all-extras
+
+      - name: Collect PR diff summary
+        run: |
+          git diff --stat "origin/${{ github.base_ref }}...HEAD" > pr-diff-summary.txt || true
+          git diff --unified=0 "origin/${{ github.base_ref }}...HEAD" > pr-diff.patch || true
+
+      - name: Run security review (deterministic secrets scan, no LLM key required)
+        run: |
+          uv run python - <<'PY' > security-review.md
+          from pathlib import Path
+
+          from godspeed.agent.review import (
+              collect_diff,
+              format_findings,
+              security_scan_files,
+          )
+
+          diff = collect_diff(Path.cwd())
+          if not diff.ok:
+              print(f"diff collection failed: {diff.error}")
+          else:
+              findings = security_scan_files(diff.changed_files, Path.cwd())
+              print(format_findings(findings, "No secrets detected in changed files."))
+          PY
+
+      - name: Run code review with LLM (optional)
+        if: ${{ env.ANTHROPIC_API_KEY != '' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv run godspeed run \
+            --timeout 600 \
+            "Review the diff in pr-diff.patch for bugs, security risks, and cleanups. Reference pr-diff-summary.txt for scope. Output a concise findings list." \
+          > code-review.md
+
+      - name: Post review comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = [
+              '## 🤖 Godspeed Review',
+              fs.existsSync('code-review.md') && fs.readFileSync('code-review.md', 'utf8').trim()
+                ? '### Findings\n' + fs.readFileSync('code-review.md', 'utf8')
+                : '> LLM review skipped (no API key configured).',
+              fs.existsSync('security-review.md') && fs.readFileSync('security-review.md', 'utf8').trim()
+                ? '### Security\n' + fs.readFileSync('security-review.md', 'utf8')
+                : '',
+            ].filter(Boolean).join('\n\n');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
+import time
 from collections.abc import Callable
 from datetime import UTC
 from pathlib import Path
@@ -12,6 +14,12 @@ from typing import Any, ClassVar
 
 from godspeed.config import append_permission_rule
 from godspeed.tui import output as _output
+from godspeed.tui.loop_state import (
+    LOOP_DEFAULT_INTERVAL_SECONDS,
+    LoopState,
+    is_loop_interval,
+    parse_loop_interval,
+)
 from godspeed.tui.output import (
     format_error,
     format_info,
@@ -92,6 +100,8 @@ class Commands:
         self.auto_commit_threshold: int = 5
         self.architect_mode: bool = False
         self.whisper_mode: bool = False
+        self._session_goal: str = ""
+        self._loop_state = LoopState()
 
         self._handlers: dict[str, CommandHandler] = {}
         self._handlers["/help"] = self._cmd_help
@@ -103,6 +113,9 @@ class Commands:
         self._handlers["/remember"] = self._cmd_remember
         self._handlers["/extend"] = self._cmd_extend
         self._handlers["/context"] = self._cmd_context
+        self._handlers["/compact"] = self._cmd_compact
+        self._handlers["/verify"] = self._cmd_verify
+        self._handlers["/batch"] = self._cmd_batch
         self._handlers["/plan"] = self._cmd_plan
         self._handlers["/checkpoint"] = self._cmd_checkpoint
         self._handlers["/restore"] = self._cmd_restore
@@ -112,6 +125,7 @@ class Commands:
         self._handlers["/tasks"] = self._cmd_tasks
         self._handlers["/reindex"] = self._cmd_reindex
         self._handlers["/stats"] = self._cmd_stats
+        self._handlers["/usage"] = self._cmd_usage
         self._handlers["/autocommit"] = self._cmd_autocommit
         self._handlers["/architect"] = self._cmd_architect
         self._handlers["/think"] = self._cmd_think
@@ -131,6 +145,15 @@ class Commands:
         self._handlers["/tools"] = self._cmd_tools
         self._handlers["/diff"] = self._cmd_diff
         self._handlers["/whisper"] = self._cmd_whisper
+        self._handlers["/btw"] = self._cmd_btw
+        self._handlers["/goal"] = self._cmd_goal
+        self._handlers["/rewind"] = self._cmd_rewind
+        self._handlers["/fork"] = self._cmd_fork
+        self._handlers["/effort"] = self._cmd_effort
+        self._handlers["/loop"] = self._cmd_loop
+        self._handlers["/code-review"] = self._cmd_code_review
+        self._handlers["/security-review"] = self._cmd_security_review
+        self._handlers["/simplify"] = self._cmd_simplify
 
         # Short aliases for power-user productivity
         self._handlers["/q"] = self._cmd_quit
@@ -154,6 +177,8 @@ class Commands:
     # External references — set after Commands init
     _task_store: Any | None = None
     _codebase_index: Any | None = None
+    _message_queue: Any | None = None
+    _session_memory: Any | None = None
 
     def register(self, name: str, handler: CommandHandler) -> None:
         """Register a custom slash command."""
@@ -206,6 +231,7 @@ class Commands:
                     ("/scan", "Scan hardware and recommend optimal models"),
                     ("/clear", "Clear conversation history"),
                     ("/stats", "Show token usage and estimated cost"),
+                    (r"/usage \[scope]", "Show usage breakdown (tokens, tools, agents)"),
                     ("/export [name]", "Export conversation as markdown"),
                     ("/correct <msg>", "Record a correction for future sessions"),
                     ("/preferences", "Show stored user preferences"),
@@ -224,19 +250,36 @@ class Commands:
                     ("/think [budget]", "Toggle extended thinking or set token budget"),
                     ("/budget [amount]", "Show/set cost budget in USD"),
                     ("/evolve [cmd]", "Self-evolution: status|run|history|rollback|review"),
+                    ("/verify [instructions]", "Build, launch, and observe the project"),
+                    ("/batch [units=N] <goal>", "Decompose a task into parallel worktree units"),
                     ("/pause", "Pause the agent loop"),
                     ("/resume", "Resume a paused agent"),
                     ("/guidance <msg>", "Inject guidance and resume"),
+                    ("/btw <question>", "Side-question without corrupting conversation"),
+                    ("/goal [text|clear]", "Set, show, or clear the session goal"),
+                    ("/effort low|medium|high", "Set reasoning effort (read at call time)"),
+                    (r"/loop \[interval] <prompt>", "prompt loops on interval"),
                 ],
             ),
             (
                 "Context",
                 [
                     ("/context", "Show context window usage"),
+                    ("/compact [instructions]", "Manually compact the conversation"),
+                    ("/rewind", "Rewind picker: restore conversation/files/checkpoints"),
+                    ("/fork [label]", "Duplicate the session for later resume"),
                     ("/checkpoint [name]", "Save/list checkpoints"),
                     ("/restore <name>", "Restore a checkpoint"),
                     ("/tasks", "Show task list"),
                     ("/reindex", "Rebuild codebase search index"),
+                ],
+            ),
+            (
+                "Review",
+                [
+                    ("/code-review [--fix]", "Review the working-tree diff for bugs and cleanups"),
+                    ("/security-review", "Security scan: deterministic secrets scan + LLM review"),
+                    ("/simplify", "Cleanup-only review (dead code, duplication, naming)"),
                 ],
             ),
             (
@@ -647,6 +690,505 @@ class Commands:
             )
         return CommandResult(handled=True)
 
+    # ------------------------------------------------------------------
+    # /btw — side-question without corrupting conversation history
+    # ------------------------------------------------------------------
+
+    def _cmd_btw(self, args: str = "") -> CommandResult:
+        """Answer a side-question without modifying the main conversation.
+
+        Usage:
+            /btw <question>
+
+        Snapshots the current messages, appends the question, runs ONE
+        assistant turn with a small token budget, prints the answer under
+        a ``btw`` heading, then discards the snapshot.  The main
+        conversation is byte-identical afterward.
+
+        If the LLM call fails, a graceful error is printed and state is
+        still restored.
+        """
+        import asyncio
+
+        from rich.panel import Panel
+
+        from godspeed.agent.aside import (
+            build_btw_messages,
+            snapshot_messages,
+            verify_conversation_unchanged,
+        )
+
+        question = args.strip()
+        if not question:
+            format_error("Usage: /btw <your question>")
+            return CommandResult(handled=True)
+
+        # Deep-copy current state so we can verify nothing leaked.
+        original_snapshot = snapshot_messages(self._conversation.messages)
+
+        try:
+            btw_messages = build_btw_messages(self._conversation.messages, question)
+        except ValueError as exc:
+            format_error(str(exc))
+            return CommandResult(handled=True)
+
+        async def _run_btw() -> None:
+            try:
+                response = await self._llm_client.chat(
+                    messages=btw_messages,
+                    tools=None,
+                    task_type="chat",
+                )
+                answer = response.content or "(no response)"
+
+                _output.console.print()
+                panel = Panel(
+                    answer,
+                    title=f"[{BOLD_PRIMARY}]btw[/{BOLD_PRIMARY}]",
+                    border_style=DIM,
+                    expand=False,
+                    padding=(0, 1),
+                )
+                _output.console.print(panel)
+            except Exception as exc:
+                logger.warning("btw LLM call failed: %s", exc)
+                format_error(f"btw failed: {exc}")
+            finally:
+                # Safety: verify the main conversation was never touched.
+                if not verify_conversation_unchanged(
+                    original_snapshot, self._conversation.messages
+                ):
+                    logger.error("btw handler leaked into main conversation — restoring snapshot")
+                    self._conversation.replace_messages([dict(m) for m in original_snapshot[1:]])
+
+        asyncio.create_task(_run_btw())  # noqa: RUF006
+        format_info("asking btw...")
+        return CommandResult(handled=True)
+
+    # ------------------------------------------------------------------
+    # /goal — session goal tracking
+    # ------------------------------------------------------------------
+
+    def _cmd_goal(self, args: str = "") -> CommandResult:
+        """Set, show, or clear the session goal.
+
+        Usage:
+            /goal                   — show the current goal
+            /goal <text>            — set the session goal
+            /goal clear             — remove the goal
+
+        The goal is stored in-memory on the Commands instance and
+        surfaces in the status HUD when set.
+        """
+        arg = args.strip()
+
+        if not arg:
+            # Show current goal
+            if self._session_goal:
+                format_info(f"Session goal: [{BOLD_PRIMARY}]{self._session_goal}[/{BOLD_PRIMARY}]")
+            else:
+                format_info("No session goal set. Use /goal <text> to set one.")
+            return CommandResult(handled=True)
+
+        if arg.lower() == "clear":
+            self._session_goal = ""
+            format_info("Session goal cleared.")
+            return CommandResult(handled=True)
+
+        self._session_goal = arg
+        format_success(f"Session goal: [{BOLD_PRIMARY}]{arg}[/{BOLD_PRIMARY}]")
+        return CommandResult(handled=True)
+
+    # ------------------------------------------------------------------
+    # /effort — session reasoning effort
+    # ------------------------------------------------------------------
+
+    def _cmd_effort(self, args: str = "") -> CommandResult:
+        """Set, show, or clear the session reasoning effort.
+
+        Usage:
+            /effort                       — show current effort
+            /effort low|medium|high       — set effort
+            /effort clear                 — reset to default
+        """
+        level = args.strip().lower()
+        if not level:
+            current = getattr(self._llm_client, "reasoning_effort", "") or "(default)"
+            format_info(f"Reasoning effort: [{BOLD_PRIMARY}]{current}[/{BOLD_PRIMARY}]")
+            return CommandResult(handled=True)
+        if level == "clear":
+            self._llm_client.reasoning_effort = ""
+            format_info("Reasoning effort reset to default.")
+            return CommandResult(handled=True)
+        if level not in ("low", "medium", "high"):
+            format_error("Usage: /effort low|medium|high|clear")
+            return CommandResult(handled=True)
+        self._llm_client.reasoning_effort = level
+        format_success(f"Reasoning effort set to [{BOLD_PRIMARY}]{level}[/{BOLD_PRIMARY}]")
+        return CommandResult(handled=True)
+
+    # ------------------------------------------------------------------
+    # /fork — duplicate the session for later resume
+    # ------------------------------------------------------------------
+
+    def _cmd_fork(self, args: str = "") -> CommandResult:
+        """Duplicate the current conversation into a resumable fork.
+
+        Usage:
+            /fork [label]
+
+        Writes the current messages under a new session id, registers the
+        fork in session memory, and leaves the live session untouched. The
+        fork can be resumed later with ``godspeed --resume <id>``.
+        """
+        import uuid as _uuid
+
+        if self._session_memory is None:
+            format_error(
+                "Session memory is unavailable in this context; fork needs "
+                "a session store to register the copy."
+            )
+            return CommandResult(handled=True)
+
+        label = args.strip()
+        fork_id = f"{self._session_id}-fork-{_uuid.uuid4().hex[:6]}"
+        messages = [dict(m) for m in self._conversation.messages]
+        self._session_memory.start_session(
+            fork_id, model=getattr(self._llm_client, "model", ""), project_dir=str(self._cwd)
+        )
+        self._session_memory.save_messages(fork_id, messages)
+        summary = (
+            f"Forked from session {self._session_id}"
+            + (f" ({label})" if label else "")
+            + f"; {len(messages)} messages."
+        )
+        self._session_memory.end_session(fork_id, summary=summary)
+        format_success(f"Forked session: [{BOLD_PRIMARY}]{fork_id}[/{BOLD_PRIMARY}]")
+        format_info(f"Resume later with: godspeed --resume {fork_id}")
+        return CommandResult(handled=True)
+
+    # ------------------------------------------------------------------
+    # /loop — recurring prompt on an interval
+    # ------------------------------------------------------------------
+
+    def _cmd_loop(self, args: str = "") -> CommandResult:
+        """Run a prompt on a recurring interval.
+
+        Usage:
+            /loop <prompt>            — loop every 60s
+            /loop 5m <prompt>         — loop every 5 minutes
+            /loop                     — show loop status
+            /loop stop                — stop looping
+
+        The prompt is re-dispatched as a user turn after each completed
+        agent turn once the interval has elapsed. Note: if the loop
+        prompt itself is "/loop stop", the dispatched turn will cancel
+        the loop — treated as data, acceptable.
+        """
+        arg = args.strip()
+
+        if not arg:
+            if self._loop_state.enabled:
+                format_info(
+                    f"Looping every {self._loop_state.interval:g}s: "
+                    f"[{BOLD_PRIMARY}]{self._loop_state.prompt}[/{BOLD_PRIMARY}]"
+                )
+            else:
+                format_info("Not looping. Use /loop <prompt> to start.")
+            return CommandResult(handled=True)
+
+        if arg.lower() == "stop":
+            self._loop_state.stop()
+            format_info("Loop stopped.")
+            return CommandResult(handled=True)
+
+        try:
+            interval, prompt = self._split_loop_args(arg)
+        except ValueError as exc:
+            format_error(str(exc))
+            return CommandResult(handled=True)
+
+        if not prompt:
+            format_error("Usage: /loop [interval] <prompt>")
+            return CommandResult(handled=True)
+
+        self._loop_state.start(prompt, interval)
+        format_success(f"Looping every {interval:g}s: [{BOLD_PRIMARY}]{prompt}[/{BOLD_PRIMARY}]")
+        logger.info("loop started interval=%s prompt=%r", interval, prompt)
+        return CommandResult(handled=True)
+
+    def _split_loop_args(self, arg: str) -> tuple[float, str]:
+        """Split '/loop [interval] <prompt>' args into (interval, prompt).
+
+        The first whitespace-delimited token is treated as an interval
+        when it is a syntactically valid spec (bare number or Ns/Nm/Nh
+        suffix); otherwise the whole argument is the prompt with the
+        default interval. Raises ``ValueError`` for a zero interval.
+        """
+        first, _, rest = arg.partition(" ")
+        if is_loop_interval(first):
+            interval = parse_loop_interval(first)
+            return interval, rest.strip()
+        return LOOP_DEFAULT_INTERVAL_SECONDS, arg
+
+    def _maybe_dispatch_loop_turn(self, now: float | None = None) -> bool:
+        """Enqueue the loop prompt if the loop is enabled and due.
+
+        Called by the app right after draining the message queue at the
+        turn-completion point. Returns True when a loop turn was
+        enqueued so the app can process it immediately.
+
+        Skips while paused: loop turns must never stall on the pause
+        event. The timer is left untouched while paused, so the loop
+        resumes on schedule once unpaused.
+        """
+        if not self._loop_state.enabled:
+            return False
+        if self._pause_event is not None and not self._pause_event.is_set():
+            return False
+        if self._message_queue is None:
+            return False
+        current = time.monotonic() if now is None else now
+        if not self._loop_state.is_due(current):
+            return False
+        message = self._loop_state.mark_dispatched(current)
+        self._message_queue.enqueue(message)
+        logger.debug(
+            "loop turn dispatched turn=%d prompt=%r",
+            self._loop_state.turn_count,
+            self._loop_state.prompt,
+        )
+        return True
+
+    # ------------------------------------------------------------------
+    # /code-review, /security-review, /simplify — diff review commands
+    # ------------------------------------------------------------------
+
+    def _run_review(
+        self,
+        mode: str,
+        args: str,
+        extra_scan: Callable[[], list[str]] | None = None,
+    ) -> CommandResult:
+        """Shared single-shot diff review used by the three review commands."""
+        import asyncio
+
+        from rich.panel import Panel
+
+        from godspeed.agent.review import (
+            collect_diff,
+            findings_from_response,
+            format_findings,
+            parse_review_args,
+            review_prompt,
+        )
+
+        flags, positional = parse_review_args(args)
+        diff = collect_diff(self._cwd)
+        if diff.error:
+            format_error(diff.error)
+            return CommandResult(handled=True)
+
+        deterministic_findings = extra_scan() if extra_scan is not None else []
+        title = mode.replace("-", " ").title() + " Review"
+
+        if "--fix" not in flags and mode != "security":
+
+            async def _run() -> None:
+                try:
+                    text_prompt = review_prompt(mode, diff, extra=positional)
+                    response = await self._llm_client.chat(
+                        messages=[{"role": "user", "content": text_prompt}],
+                        tools=None,
+                        task_type="verification",
+                    )
+                    findings = findings_from_response(response.content or "")
+                    if deterministic_findings:
+                        findings = deterministic_findings + findings
+                    _output.console.print()
+                    _output.console.print(
+                        Panel(
+                            format_findings(findings, "No issues found."),
+                            title=f"[{BOLD_PRIMARY}] {title} [/{BOLD_PRIMARY}]",
+                            border_style=DIM if not findings else "error",
+                            expand=False,
+                            padding=(0, 1),
+                        )
+                    )
+                except Exception as exc:
+                    logger.warning("review LLM call failed: %s", exc)
+                    format_error(
+                        f"{mode} review failed: {exc}. Fix findings manually or rerun "
+                        "with --fix to queue an agent fix pass."
+                    )
+
+            asyncio.create_task(_run())  # noqa: RUF006
+            format_info(f"Running {mode} review...")
+            return CommandResult(handled=True)
+
+        if "--fix" in flags:
+            try:
+                prompt = review_prompt(mode, diff)
+            except ValueError as exc:
+                format_error(str(exc))
+                return CommandResult(handled=True)
+            self._conversation.add_user_message(
+                f"[User guidance]: Fix the findings from the {mode} review of the "
+                f"current diff:\n{prompt}"
+            )
+            if deterministic_findings:
+                self._conversation.add_user_message(
+                    "[User guidance]: Deterministic findings to fix:\n"
+                    + "\n".join(deterministic_findings)
+                )
+            format_success(
+                "Fix instructions queued as user guidance — they run on the next agent turn."
+            )
+            return CommandResult(handled=True)
+
+        async def _run_security() -> None:
+            findings: list[str] = list(deterministic_findings)
+            try:
+                text_prompt = review_prompt(mode, diff, extra=positional)
+                response = await self._llm_client.chat(
+                    messages=[{"role": "user", "content": text_prompt}],
+                    tools=None,
+                    task_type="verification",
+                )
+                findings.extend(f"[review] {f}" for f in findings_from_response(response.content))
+            except Exception as exc:
+                logger.warning("security review LLM step failed: %s", exc)
+                findings.append(
+                    "[note] LLM security review unavailable; "
+                    "showing deterministic secrets scan only."
+                )
+            _output.console.print()
+            _output.console.print(
+                Panel(
+                    format_findings(findings, "No issues found."),
+                    title=f"[{BOLD_PRIMARY}] {title} [/{BOLD_PRIMARY}]",
+                    border_style=DIM if not findings else "error",
+                    expand=False,
+                    padding=(0, 1),
+                )
+            )
+
+        asyncio.create_task(_run_security())  # noqa: RUF006
+        format_info("Running security review (deterministic scan + LLM review)...")
+        return CommandResult(handled=True)
+
+    def _cmd_code_review(self, args: str = "") -> CommandResult:
+        """Review the working-tree diff for bugs, risks, and cleanups."""
+        return self._run_review("code", args)
+
+    def _cmd_simplify(self, args: str = "") -> CommandResult:
+        """Cleanup-only review of the working-tree diff."""
+        return self._run_review("simplify", args)
+
+    def _cmd_security_review(self, args: str = "") -> CommandResult:
+        """Security scan of the working-tree diff (secrets + LLM review)."""
+        from godspeed.agent.review import collect_diff, security_scan_files
+
+        scan_diff = collect_diff(self._cwd)
+        if scan_diff.error:
+            format_error(scan_diff.error)
+            return CommandResult(handled=True)
+
+        def _extra_scan() -> list[str]:
+            return security_scan_files(scan_diff.changed_files, self._cwd)
+
+        return self._run_review("security", args, extra_scan=_extra_scan)
+
+    # ------------------------------------------------------------------
+    # /rewind — slash alias for the ESC-ESC rewind picker
+    # ------------------------------------------------------------------
+
+    def _cmd_rewind(self, args: str = "") -> CommandResult:
+        """Rewind picker: list available checkpoints and restore.
+
+        Usage:
+            /rewind          — list checkpoints and prompt for selection
+            /rewind <number> — directly select checkpoint by number
+
+        Reuses the same ``collect_rewind_entries``, ``parse_rewind_choice``
+        and restore functions that the ESC-ESC keybinding path uses,
+        ensuring both entry points stay consistent.  See ``tui/rewind.py``
+        for the underlying restore logic.
+        """
+        from godspeed.tui.rewind import (
+            RESTORE_BOTH,
+            RESTORE_CONVERSATION,
+            RESTORE_FILES,
+            RESTORE_NONE,
+            collect_rewind_entries,
+            parse_rewind_choice,
+            restore_conversation,
+            restore_files,
+        )
+
+        entries = collect_rewind_entries(self._cwd, self._session_id)
+        if not entries:
+            format_info("No rewind checkpoints available.")
+            return CommandResult(handled=True)
+
+        _output.console.print()
+        _output.console.print(f"  {styled('Rewind Checkpoints', BOLD_PRIMARY)}")
+        _output.console.print(f"  {styled(RULE_CHAR * 30, NEUTRAL)}")
+        for idx, entry in enumerate(entries, 1):
+            kind_label = styled(f"[{entry.kind[:3]}]", NEUTRAL)
+            _output.console.print(
+                f"    {styled(str(idx), BOLD_PRIMARY)}. "
+                f"{kind_label} {styled(entry.name, NEUTRAL)} — {styled(entry.detail, DIM)}"
+            )
+        _output.console.print(f"  [{DIM}]Choose an entry number, or 0 to cancel.[/{DIM}]")
+
+        selection = args.strip()
+        if not selection:
+            try:
+                selection = _output.console.input(f"[{WARNING}]  > [/{WARNING}]").strip()
+            except (KeyboardInterrupt, EOFError):
+                format_info("Rewind cancelled.")
+                return CommandResult(handled=True)
+
+        if not selection.isdigit():
+            format_info("Rewind cancelled.")
+            return CommandResult(handled=True)
+
+        idx = int(selection)
+        if idx < 1 or idx > len(entries):
+            format_info("Rewind cancelled.")
+            return CommandResult(handled=True)
+
+        chosen = entries[idx - 1]
+
+        _output.console.print(
+            f"  [{DIM}]Restore what? [c]onversation / [f]iles / [b]oth / [n]one[/{DIM}]"
+        )
+        try:
+            choice = _output.console.input(f"[{WARNING}]  > [/{WARNING}]").strip()
+        except (KeyboardInterrupt, EOFError):
+            choice = "n"
+
+        action = parse_rewind_choice(choice)
+        if action == RESTORE_NONE:
+            format_info("Rewind cancelled.")
+            return CommandResult(handled=True)
+
+        if action in (RESTORE_CONVERSATION, RESTORE_BOTH):
+            if chosen.kind == "conversation":
+                summary = restore_conversation(self._conversation, chosen.name, self._cwd)
+                format_success(summary)
+            else:
+                format_warning(
+                    f"Entry {chosen.name} is a file checkpoint — no conversation to restore."
+                )
+
+        if action in (RESTORE_FILES, RESTORE_BOTH):
+            summary = restore_files(self._cwd, self._session_id)
+            format_success(summary)
+
+        return CommandResult(handled=True)
+
     def _cmd_think(self, args: str = "") -> CommandResult:
         """Toggle extended thinking or set the thinking token budget."""
         arg = args.strip()
@@ -883,7 +1425,11 @@ class Commands:
         return CommandResult(handled=True)
 
     def _cmd_context(self, _args: str = "") -> CommandResult:
-        """Show context window usage."""
+        """Show context window usage with a detailed token breakdown."""
+        from rich.table import Table
+
+        from godspeed.llm.token_counter import count_message_tokens, count_tokens
+
         tokens = self._conversation.token_count
         max_tokens = self._conversation.max_tokens
         pct = (tokens / max_tokens * 100) if max_tokens > 0 else 0
@@ -900,6 +1446,196 @@ class Commands:
         )
         msg_count = len(self._conversation.messages)
         _output.console.print(f"  [{DIM}]messages: {msg_count}[/{DIM}]")
+
+        model = getattr(self._llm_client, "model", "") or self._conversation.model
+        messages = self._conversation.messages
+        system_tokens = count_message_tokens([messages[0]], model) if messages else 0
+        conv_tokens = count_message_tokens(messages[1:], model) if len(messages) > 1 else 0
+
+        tool_tokens = 0
+        if self._tool_registry is not None:
+            try:
+                schemas = self._tool_registry.get_schemas()
+                tool_tokens = count_tokens(str(schemas), model)
+            except Exception:
+                logger.warning("Failed to count tool schema tokens", exc_info=True)
+
+        free_space = max(0, max_tokens - tokens)
+
+        table = Table(show_header=False, border_style=NEUTRAL, expand=False, padding=(0, 2))
+        table.add_column("Component", style=TABLE_KEY)
+        table.add_column("Tokens", style=TABLE_VALUE, justify="right")
+        table.add_row("System prompt", f"{system_tokens:,}")
+        table.add_row("Tool schemas", f"{tool_tokens:,}")
+        table.add_row("Conversation", f"{conv_tokens:,}")
+        table.add_row("Free space", f"{free_space:,}")
+        _output.console.print(table)
+        return CommandResult(handled=True)
+
+    def _cmd_compact(self, args: str = "") -> CommandResult:
+        """Manually trigger conversation compaction.
+
+        Usage:
+            /compact [instructions]
+
+        Optional instructions guide what the compaction summary preserves.
+        Compaction runs in the background so the TUI stays responsive.
+        """
+        import asyncio
+
+        from godspeed.context.compaction import compact_now
+
+        instructions = args.strip()
+
+        # Sensible minimum: don't compact tiny conversations.
+        if len(self._conversation.messages) < 10:
+            format_info("Nothing to compact — fewer than 10 messages.")
+            return CommandResult(handled=True)
+
+        async def _run() -> None:
+            result = await compact_now(
+                self._conversation,
+                self._llm_client,
+                instructions=instructions,
+            )
+            if result.applied:
+                format_success(
+                    f"Compacted: {result.messages_before} messages -> "
+                    f"{result.messages_after} messages"
+                )
+            else:
+                format_error("Compaction failed.")
+
+        asyncio.create_task(_run())  # noqa: RUF006
+        format_info("Compacting conversation...")
+        return CommandResult(handled=True)
+
+    def _cmd_verify(self, args: str = "") -> CommandResult:
+        """Build, launch, and observe the project to confirm it actually runs.
+
+        Usage:
+            /verify [instructions]
+
+        Optional instructions are recorded as context for the agent (they do
+        not change the verification steps). The verifier runs in the
+        background so the TUI stays responsive, then prints a PASS/FAIL
+        verdict panel with evidence lines.
+        """
+        import asyncio
+
+        from godspeed.tools.runtime_verify import RuntimeVerifier
+
+        instructions = args.strip()
+        if instructions:
+            logger.info("verify.instructions=%s", instructions)
+
+        async def _run() -> None:
+            verifier = RuntimeVerifier(self._cwd)
+            verdict = await asyncio.to_thread(verifier.verify)
+
+            if verdict.passed:
+                format_success(f"[{BOLD_PRIMARY}]Runtime Verify: PASS[/{BOLD_PRIMARY}]")
+            else:
+                format_error(f"[{BOLD_PRIMARY}]Runtime Verify: FAIL[/{BOLD_PRIMARY}]")
+
+            for line in verdict.evidence:
+                _output.console.print(f"  [{DIM}]{line}[/{DIM}]")
+
+            if not verdict.passed:
+                _output.console.print()
+                format_warning(
+                    "The agent can be asked to fix the failure. "
+                    "Describe the issue and it will attempt a repair."
+                )
+
+        asyncio.create_task(_run())  # noqa: RUF006
+        format_info("Running runtime verification...")
+        return CommandResult(handled=True)
+
+    def _cmd_batch(self, args: str = "") -> CommandResult:
+        """Decompose a task into parallel units and run each in an isolated worktree.
+
+        Usage:
+            /batch [units=N] <goal>
+
+        Each unit runs as a sub-agent in its own git worktree, up to 5 in
+        parallel. Results are collected and printed when all units finish.
+        """
+        import asyncio
+
+        from godspeed.agent.batch import (
+            MAX_BATCH_UNITS,
+            BatchGitError,
+            WorktreeBatchRunner,
+            decompose_task,
+        )
+        from godspeed.agent.coordinator import AgentCoordinator
+        from godspeed.tools.base import ToolContext
+
+        if self._tool_registry is None:
+            format_error("Tool registry not available — /batch requires tools.")
+            return CommandResult(handled=True)
+
+        num_units = 5
+        goal = args.strip()
+        match = re.match(r"^units=(\d+)\s+(.+)$", goal, re.DOTALL)
+        if match:
+            num_units = int(match.group(1))
+            goal = match.group(2).strip()
+        if not goal:
+            format_error("Usage: /batch [units=N] <goal>")
+            return CommandResult(handled=True)
+        if num_units > MAX_BATCH_UNITS:
+            format_error(f"units must be at most {MAX_BATCH_UNITS}.")
+            return CommandResult(handled=True)
+
+        tool_context = ToolContext(
+            cwd=self._cwd,
+            session_id=self._session_id,
+            permissions=self._permission_engine,
+            audit=self._audit_trail,
+            llm_client=self._llm_client,
+        )
+        coordinator = AgentCoordinator(
+            llm_client=self._llm_client,
+            tool_registry=self._tool_registry,
+            tool_context=tool_context,
+        )
+
+        async def _run() -> None:
+            try:
+                plan = await decompose_task(
+                    goal,
+                    num_units_hint=num_units,
+                    llm_client=self._llm_client,
+                )
+            except ValueError as exc:
+                format_error(f"Batch decomposition failed: {exc}")
+                return
+            format_info(f"Batch plan: {len(plan.units)} unit(s) — running in isolated worktrees.")
+            runner = WorktreeBatchRunner(
+                working_dir=self._cwd,
+                coordinator=coordinator,
+            )
+            try:
+                results = await runner.run(plan)
+            except BatchGitError as exc:
+                format_error(f"Batch aborted: {exc}")
+                return
+            for result in results:
+                if result.ok:
+                    format_success(f"[batch] {result.id}: done — {result.summary[:120]}")
+                else:
+                    format_error(f"[batch] {result.id}: FAILED — {result.summary[:120]}")
+                    if result.worktree_path is not None:
+                        format_warning(
+                            f"[batch] {result.id}: worktree left at {result.worktree_path}"
+                        )
+            ok_count = sum(1 for r in results if r.ok)
+            format_info(f"Batch finished: {ok_count}/{len(results)} units succeeded.")
+
+        asyncio.create_task(_run())  # noqa: RUF006
+        format_info("Starting batch...")
         return CommandResult(handled=True)
 
     def _cmd_checkpoint(self, args: str = "") -> CommandResult:
@@ -1104,6 +1840,212 @@ class Commands:
             model=self._llm_client.model,
             session_id=self._session_id,
             cost=cost if cost > 0 else None,
+        )
+        return CommandResult(handled=True)
+
+    def _cmd_usage(self, args: str = "") -> CommandResult:
+        """Show session usage breakdown: tokens, tools, and sub-agents.
+
+        Usage:
+            /usage            — session totals + per-task-type breakdown
+            /usage tools      — tool-call counts from the audit trail
+            /usage agents     — sub-agent invocations (if instrumented)
+
+        Only measurable data is shown. Dimensions the codebase does not
+        track (e.g. per-task-type token attribution, per-subagent tokens)
+        are stated as gaps rather than fabricated.
+        """
+        from rich.panel import Panel
+        from rich.table import Table
+
+        from godspeed.llm.cost import format_cost
+        from godspeed.observability.usage_report import from_client
+
+        scope = args.strip().lower()
+
+        if scope == "tools":
+            return self._usage_tools()
+
+        if scope == "agents":
+            return self._usage_agents()
+
+        if scope:
+            format_error(f"Unknown scope: {scope}. Use /usage, /usage tools, or /usage agents.")
+            return CommandResult(handled=True)
+
+        ledger = getattr(self._llm_client, "usage_ledger", None)
+        report = from_client(self._llm_client, ledger)
+
+        _output.console.print()
+        _output.console.print(f"  {styled('Session Usage', BOLD_PRIMARY)}")
+        _output.console.print(f"  {styled(RULE_CHAR * 30, NEUTRAL)}")
+
+        summary = Table(show_header=False, border_style=NEUTRAL, expand=False, padding=(0, 2))
+        summary.add_column("Metric", style=TABLE_KEY)
+        summary.add_column("Value", style=TABLE_VALUE, justify="right")
+        summary.add_row("Input tokens", f"{report.total_input_tokens:,}")
+        summary.add_row("Output tokens", f"{report.total_output_tokens:,}")
+        summary.add_row("Total tokens", f"{report.total_tokens:,}")
+        summary.add_row("Estimated cost", format_cost(report.total_cost_usd))
+        _output.console.print(summary)
+
+        if report.by_task_type:
+            tt_table = Table(
+                title="By Task Type",
+                border_style=TABLE_BORDER,
+                expand=False,
+            )
+            tt_table.add_column("Task Type", style=BOLD_PRIMARY)
+            tt_table.add_column("Calls", justify="right")
+            tt_table.add_column("Input", justify="right")
+            tt_table.add_column("Output", justify="right")
+            tt_table.add_column("Cost", justify="right")
+            for task_type, row in sorted(report.by_task_type.items()):
+                tt_table.add_row(
+                    task_type,
+                    str(row.calls),
+                    f"{row.input_tokens:,}",
+                    f"{row.output_tokens:,}",
+                    format_cost(row.cost_usd),
+                )
+            _output.console.print(tt_table)
+        else:
+            _output.console.print(
+                Panel(
+                    "No task-type calls recorded yet — attribution appears "
+                    "after the first LLM call in this session.",
+                    title="Task Type Breakdown",
+                    border_style=DIM,
+                    expand=False,
+                    padding=(0, 1),
+                )
+            )
+
+        return CommandResult(handled=True)
+
+    def _usage_tools(self) -> CommandResult:
+        """Render the ``tools`` scope: tool-call counts from the audit trail."""
+        from rich.panel import Panel
+        from rich.table import Table
+
+        from godspeed.llm.cost import format_cost
+        from godspeed.observability.usage_report import from_audit
+
+        if self._audit_trail is None:
+            format_info("Audit trail is disabled — no tool-call data available.")
+            return CommandResult(handled=True)
+
+        report = from_audit(self._audit_trail)
+
+        _output.console.print()
+        _output.console.print(f"  {styled('Tool Usage', BOLD_PRIMARY)}")
+        _output.console.print(f"  {styled(RULE_CHAR * 30, NEUTRAL)}")
+
+        if not report.by_tool:
+            _output.console.print(
+                Panel(
+                    "No tool calls recorded in the audit trail yet.",
+                    title="Tool Calls",
+                    border_style=DIM,
+                    expand=False,
+                    padding=(0, 1),
+                )
+            )
+            return CommandResult(handled=True)
+
+        table = Table(title="Tool Calls", border_style=TABLE_BORDER, expand=False)
+        table.add_column("Tool", style=BOLD_PRIMARY)
+        table.add_column("Calls", justify="right")
+        table.add_column("Input Tokens", justify="right")
+        table.add_column("Output Tokens", justify="right")
+        table.add_column("Cost", justify="right")
+        for tool_name, row in sorted(report.by_tool.items(), key=lambda kv: -kv[1].calls):
+            table.add_row(
+                tool_name,
+                str(row.calls),
+                f"{row.input_tokens:,}",
+                f"{row.output_tokens:,}",
+                format_cost(row.cost_usd),
+            )
+        _output.console.print(table)
+
+        _output.console.print(
+            Panel(
+                "Per-tool token/cost attribution is not recorded in the audit "
+                "trail — only call counts are measurable.",
+                title="Note",
+                border_style=DIM,
+                expand=False,
+                padding=(0, 1),
+            )
+        )
+        return CommandResult(handled=True)
+
+    def _usage_agents(self) -> CommandResult:
+        """Render the ``agents`` scope: sub-agent invocations and cost share."""
+        from rich.panel import Panel
+        from rich.table import Table
+
+        from godspeed.llm.cost import format_cost
+        from godspeed.observability.usage_report import SubagentRow, from_audit
+
+        _output.console.print()
+        _output.console.print(f"  {styled('Sub-Agent Usage', BOLD_PRIMARY)}")
+        _output.console.print(f"  {styled(RULE_CHAR * 30, NEUTRAL)}")
+
+        sub_cost = getattr(self._llm_client, "total_sub_agent_cost", None)
+        if not isinstance(sub_cost, (int, float)):
+            sub_cost = 0.0
+
+        if sub_cost > 0:
+            table = Table(show_header=False, border_style=NEUTRAL, expand=False, padding=(0, 2))
+            table.add_column("Metric", style=TABLE_KEY)
+            table.add_column("Value", style=TABLE_VALUE, justify="right")
+            table.add_row("Aggregate sub-agent cost", format_cost(float(sub_cost)))
+            _output.console.print(table)
+
+        by_subagent: dict[str, SubagentRow] = {}
+        ledger = getattr(self._llm_client, "usage_ledger", None)
+        if ledger is not None and hasattr(ledger, "by_subagent"):
+            for agent_name, row in ledger.by_subagent().items():
+                if agent_name == "parent":
+                    continue
+                by_subagent[agent_name] = SubagentRow(
+                    calls=row.calls,
+                    input_tokens=row.input_tokens,
+                    output_tokens=row.output_tokens,
+                    cost_usd=row.cost_usd,
+                )
+        if not by_subagent and self._audit_trail is not None:
+            by_subagent = from_audit(self._audit_trail).by_subagent
+
+        if by_subagent:
+            sa_table = Table(title="Sub-Agents", border_style=TABLE_BORDER, expand=False)
+            sa_table.add_column("Session", style=BOLD_PRIMARY)
+            sa_table.add_column("Calls", justify="right")
+            sa_table.add_column("Input Tokens", justify="right")
+            sa_table.add_column("Output Tokens", justify="right")
+            sa_table.add_column("Cost", justify="right")
+            for agent_name, row in sorted(by_subagent.items()):
+                sa_table.add_row(
+                    agent_name,
+                    str(row.calls),
+                    f"{row.input_tokens:,}",
+                    f"{row.output_tokens:,}",
+                    format_cost(row.cost_usd),
+                )
+            _output.console.print(sa_table)
+            return CommandResult(handled=True)
+
+        _output.console.print(
+            Panel(
+                "No per-subagent usage recorded in this session: either no "
+                "sub-agents have run, or none made instrumented LLM calls.",
+                title="Note",
+                border_style=DIM,
+                expand=False,
+                padding=(0, 1),
+            )
         )
         return CommandResult(handled=True)
 
