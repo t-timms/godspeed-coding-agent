@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import random
 import re
 import threading
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 # Import estimate_cost at module level to avoid scoping issues in async methods
 from godspeed.llm.cost import estimate_cost
+from godspeed.llm.usage_ledger import UsageLedger
+
+# Task-type contextvar for ledger attribution. Set around every public
+# entry point (chat / stream_chat) so private call-chain methods can
+# attribute recorded usage without threading new parameters.
+_TASK_TYPE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "godspeed_llm_task_type", default=None
+)
 
 # Rate-limit retry policy
 RATE_LIMIT_MAX_RETRIES = 4
@@ -133,6 +143,8 @@ class LLMClient:
         thinking_budget: int = 0,
         max_cost_usd: float = 0.0,
         reasoning_effort: str = "",
+        *,
+        usage_ledger: UsageLedger | None = None,
     ) -> None:
         self.model = model
         self.reasoning_effort = reasoning_effort
@@ -146,6 +158,90 @@ class LLMClient:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         self.total_cost_usd: float = 0.0
+        self.usage_ledger: UsageLedger = usage_ledger or UsageLedger()
+
+    def _record_usage(
+        self,
+        *,
+        task_type: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        cost_usd: float,
+    ) -> None:
+        """Record one completed call into the usage ledger (best effort)."""
+        try:
+            self.usage_ledger.record(
+                task_type=task_type or "default",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=cost_usd,
+            )
+        except Exception:
+            logger.debug("Usage ledger recording failed", exc_info=True)
+
+    def _resolve_model(self, task_type: str | None = None) -> tuple[str, str]:
+        """Resolve which model to use for a call without mutating shared state.
+
+        Args:
+            task_type: Optional task hint for model routing.
+
+        Returns:
+            ``(model, model_lower)`` tuple — the routed model name and its
+            pre-computed lowercase form.
+        """
+        routed = self.router.route(self.model, task_type)
+        return routed, routed.lower()
+
+    @contextmanager
+    def with_model(self, model: str) -> Generator[None, None, None]:
+        """Temporarily override ``self.model`` in an exception-safe block.
+
+        Saves and restores ``self.model`` + ``self._model_lower``.  Use for
+        synchronous-looking temporary swaps (e.g. the architect plan phase).
+        **Not safe** across ``await`` points when multiple coroutines share
+        the same client — use ``_resolve_model`` + parameter passing instead.
+        """
+        original = self.model
+        original_lower = self._model_lower
+        self.model = model
+        self._model_lower = model.lower()
+        try:
+            yield
+        finally:
+            self.model = original
+            self._model_lower = original_lower
+
+    def derive(self, model: str) -> LLMClient:
+        """Return a child client pinned to ``model`` sharing budget limits.
+
+        Use for sub-phases that run a different model (e.g. architect
+        planning) without mutating shared client state across ``await``
+        points — mutating ``self.model`` mid-session also invalidates the
+        provider prompt cache. The child starts with zeroed usage and a
+        budget capped to the parent's *remaining* spend; call :meth:`adopt`
+        afterwards to fold its delta into this client so session budgets
+        stay accurate. The child shares the parent's usage ledger so its
+        callbacks stay attributable in one place.
+        """
+        remaining_budget = (
+            max(0.0, self.max_cost_usd - self.total_cost_usd) if self.max_cost_usd > 0 else 0.0
+        )
+        return LLMClient(
+            model=model,
+            fallback_models=self.fallback_models,
+            timeout=self.timeout,
+            router=self.router,
+            thinking_budget=self.thinking_budget,
+            max_cost_usd=remaining_budget,
+            reasoning_effort=self.reasoning_effort,
+            usage_ledger=self.usage_ledger,
+        )
+
+    def adopt(self, other: LLMClient) -> None:
+        """Fold another client's usage delta into this client's totals."""
+        self.total_input_tokens += other.total_input_tokens
+        self.total_output_tokens += other.total_output_tokens
+        self.total_cost_usd += other.total_cost_usd
 
     # Ollama models known to support native tool calling
     _TOOLS_CAPABLE_OLLAMA = (
@@ -158,25 +254,43 @@ class LLMClient:
         "gemma",
     )
 
-    def _supports_tool_calling(self) -> bool:
-        """Check if current model likely supports native function calling."""
-        if self._model_lower.startswith(("ollama/", "ollama_chat/")):
-            model_name = self._model_lower.split("/", 1)[-1].split(":")[0]
+    def _supports_tool_calling(self, model_lower: str | None = None) -> bool:
+        """Check if current model likely supports native function calling.
+
+        Args:
+            model_lower: Pre-lowercased model name. Falls back to
+                ``self._model_lower`` when *None*.
+        """
+        name = model_lower or self._model_lower
+        if name.startswith(("ollama/", "ollama_chat/")):
+            model_name = name.split("/", 1)[-1].split(":")[0]
             return any(cap in model_name for cap in self._TOOLS_CAPABLE_OLLAMA)
         return True
 
-    def _effective_model(self) -> str:
+    def _effective_model(
+        self,
+        model: str | None = None,
+        model_lower: str | None = None,
+    ) -> str:
         """Return the model string to use for API calls.
 
-        Upgrades 'ollama/' to 'ollama_chat/' for tool-capable models,
-        since LiteLLM's ollama_chat provider supports native tool calling
-        while the plain ollama provider does not.
+        Upgrades ``'ollama/'`` to ``'ollama_chat/'`` for tool-capable models,
+        since LiteLLM's ``ollama_chat`` provider supports native tool calling
+        while the plain ``ollama`` provider does not.
+
+        Args:
+            model: Override model name. Falls back to ``self.model``.
+            model_lower: Pre-computed lowercase. Falls back to
+                ``self._model_lower`` (or ``model.lower()`` when *model* is
+                given but *model_lower* is not).
         """
-        if self._model_lower.startswith("ollama/") and self._supports_tool_calling():
-            upgraded = "ollama_chat/" + self.model.split("/", 1)[1]
-            logger.info("Upgrading model %s → %s for tool calling support", self.model, upgraded)
+        name = model or self.model
+        name_lower = model_lower or name.lower()
+        if name_lower.startswith("ollama/") and self._supports_tool_calling(name_lower):
+            upgraded = "ollama_chat/" + name.split("/", 1)[1]
+            logger.info("Upgrading model %s → %s for tool calling support", name, upgraded)
             return upgraded
-        return self.model
+        return name
 
     @staticmethod
     def _is_connection_error(exc: Exception) -> bool:
@@ -256,27 +370,32 @@ class LLMClient:
             task_type: Optional task hint for model routing
                 (e.g., "plan", "edit", "chat").
         """
-        # Apply model routing based on task type
-        routed_model = self.router.route(self.model, task_type)
-        if routed_model != self.model:
-            # Temporarily use the routed model
-            original_model = self.model
-            original_model_lower = self._model_lower
-            self.model = routed_model
-            self._model_lower = routed_model.lower()
-            try:
-                return await self._chat_with_fallback(messages, tools)
-            finally:
-                self.model = original_model
-                self._model_lower = original_model_lower
-        return await self._chat_with_fallback(messages, tools)
+        # Resolve model immutably — no shared-state mutation.
+        effective_model, effective_lower = self._resolve_model(task_type)
+        token = _TASK_TYPE.set(task_type)
+        try:
+            return await self._chat_with_fallback(
+                messages,
+                tools,
+                _model=effective_model,
+                _model_lower=effective_lower,
+            )
+        finally:
+            _TASK_TYPE.reset(token)
 
     async def _chat_with_fallback(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        _model: str | None = None,
+        _model_lower: str | None = None,
     ) -> ChatResponse:
         """Internal: send messages with fallback chain.
+
+        Args:
+            _model: Resolved model name (avoids reading shared ``self.model``).
+            _model_lower: Pre-computed lowercase of *_model*.
 
         Classification of failures:
         - Connection errors: server is down; skip retry, try next fallback.
@@ -287,14 +406,16 @@ class LLMClient:
         - Other errors: one short retry on the primary model, then fall
           over to the next model in the chain.
         """
-        models_to_try = [self._effective_model(), *self.fallback_models]
+        model = _model or self.model
+        model_lower = _model_lower or model.lower()
+        models_to_try = [self._effective_model(model, model_lower), *self.fallback_models]
 
         last_error: Exception | None = None
-        for idx, model in enumerate(models_to_try):
+        for idx, m in enumerate(models_to_try):
             try:
-                return await self._call(model, messages, tools)
+                return await self._call(m, messages, tools)
             except Exception as exc:
-                logger.warning("LLM call failed model=%s error=%s", model, exc)
+                logger.warning("LLM call failed model=%s error=%s", m, exc)
                 last_error = exc
 
                 if self._is_connection_error(exc):
@@ -303,7 +424,7 @@ class LLMClient:
 
                 if self._is_rate_limit_error(exc):
                     # Retry same model with exponential backoff + jitter.
-                    recovered = await self._retry_on_rate_limit(model, messages, tools, exc)
+                    recovered = await self._retry_on_rate_limit(m, messages, tools, exc)
                     if recovered is not None:
                         return recovered
                     # Exhausted rate-limit retries; move on to the next model.
@@ -314,16 +435,20 @@ class LLMClient:
                 if idx == 0:
                     await asyncio.sleep(1)
                     try:
-                        return await self._call(model, messages, tools)
+                        return await self._call(m, messages, tools)
                     except Exception as retry_exc:
                         logger.warning(
                             "Primary model retry failed model=%s error=%s",
-                            model,
+                            m,
                             retry_exc,
                         )
                         last_error = retry_exc
 
-        raise self._build_failure_error(last_error)
+        raise self._build_failure_error(
+            last_error,
+            model=model,
+            model_lower=model_lower,
+        )
 
     async def _retry_on_rate_limit(
         self,
@@ -366,17 +491,30 @@ class LLMClient:
         )
         return None
 
-    def _build_failure_error(self, last_error: Exception | None) -> RuntimeError:
-        """Build an actionable error message based on the failure type."""
+    def _build_failure_error(
+        self,
+        last_error: Exception | None,
+        *,
+        model: str | None = None,
+        model_lower: str | None = None,
+    ) -> RuntimeError:
+        """Build an actionable error message based on the failure type.
+
+        Args:
+            model: Model name for the error message (falls back to self.model).
+            model_lower: Pre-lowercased model name (falls back to self._model_lower).
+        """
+        name_lower = model_lower or self._model_lower
+        name = model or self.model
         if last_error and self._is_connection_error(last_error):
-            if self._model_lower.startswith("ollama"):
+            if name_lower.startswith("ollama"):
                 return RuntimeError(
                     "Ollama is not running. Fix with one of:\n"
                     "  1. Start Ollama:  ollama serve\n"
                     "  2. Use a cloud model:  godspeed -m claude-sonnet-4-20250514\n"
                     "  3. Set a fallback in ~/.godspeed/settings.yaml"
                 )
-            if self._model_lower.startswith(("llamacpp/", "openai/")):
+            if name_lower.startswith(("llamacpp/", "openai/")):
                 return RuntimeError(
                     "Local llama.cpp server is not running. Fix with one of:\n"
                     "  1. Start server:  python scripts/setup_qwen36_local.py\n"
@@ -384,7 +522,7 @@ class LLMClient:
                     "  3. Set a fallback in ~/.godspeed/settings.yaml"
                 )
             return RuntimeError(
-                f"Cannot connect to LLM provider for model '{self.model}'. "
+                f"Cannot connect to LLM provider for model '{name}'. "
                 "Check that the server is running and the model name is correct."
             )
         return RuntimeError(f"All models failed. Last error: {last_error}")
@@ -405,8 +543,10 @@ class LLMClient:
     ) -> list[dict[str, Any]]:
         """Apply prompt caching markers for Anthropic-compatible providers.
 
-        Marks all but the last 2 messages with cache_control, giving
-        ~75-80% input cost reduction on long conversations. OpenAI
+        Uses the ``system_and_3`` strategy: at most 3 message breakpoints on
+        the last stable messages, never on the newest message (which changes
+        every turn). This leaves room for the system-prompt breakpoint within
+        Anthropic's hard cap of 4 cache_control blocks per request. OpenAI
         handles caching automatically so we skip it there.
         """
         model_lower = model.lower()
@@ -415,14 +555,15 @@ class LLMClient:
         if not supports_caching:
             return messages
 
-        # Cache all messages except the final exchange (user+assistant pair)
-        num_to_cache = max(0, len(messages) - 2)
-        if num_to_cache == 0:
+        max_message_breakpoints = 3
+        last_stable_idx = len(messages) - 1
+        first_idx = max(0, last_stable_idx - max_message_breakpoints)
+        if first_idx >= last_stable_idx:
             return messages
 
         cached = []
         for i, msg in enumerate(messages):
-            if i < num_to_cache:
+            if first_idx <= i < last_stable_idx:
                 raw_content = msg.get("content", "")
                 if isinstance(raw_content, str) and raw_content:
                     cached.append(
@@ -649,6 +790,12 @@ class LLMClient:
             call_cost = estimate_cost(model, input_tokens, output_tokens)
             self.total_cost_usd += call_cost
             self._check_budget()
+            self._record_usage(
+                task_type=_TASK_TYPE.get(),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cost_usd=call_cost,
+            )
 
             # Return response
             response_obj = ChatResponse(
@@ -692,7 +839,7 @@ class LLMClient:
             "timeout": self.timeout,
         }
         if tools:
-            if self._supports_tool_calling():
+            if self._supports_tool_calling(model.lower()):
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
             else:
@@ -711,6 +858,12 @@ class LLMClient:
                     "thinking": True,
                     "thinking_budget": self.thinking_budget,
                 }
+
+        if self.reasoning_effort:
+            if "extra_body" in kwargs:
+                kwargs["extra_body"]["reasoning_effort"] = self.reasoning_effort
+            else:
+                kwargs["reasoning_effort"] = self.reasoning_effort
 
         response = await _get_litellm().acompletion(**kwargs)
 
@@ -802,6 +955,12 @@ class LLMClient:
 
         call_cost = estimate_cost(model, input_tokens, output_tokens)
         self.total_cost_usd += call_cost
+        self._record_usage(
+            task_type=_TASK_TYPE.get(),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cost_usd=call_cost,
+        )
 
         # Check budget after tracking
         self._check_budget()
@@ -831,50 +990,49 @@ class LLMClient:
         retries once, then falls back to batch chat() with full retry
         logic. The final response has finish_reason set.
         """
-        routed_model = self.router.route(self.model, task_type)
-        swap_model = routed_model != self.model
-        original_model = self.model
-        original_model_lower = self._model_lower
-        if swap_model:
-            self.model = routed_model
-            self._model_lower = routed_model.lower()
+        effective_model, _effective_lower = self._resolve_model(task_type)
+        token = _TASK_TYPE.set(task_type)
         try:
-            async for chunk in self._stream_chat_inner(messages, tools):
-                yield chunk
-            return
-        except Exception:
-            logger.warning("Streaming call failed, retrying once", exc_info=True)
-        finally:
-            if swap_model:
-                self.model = original_model
-                self._model_lower = original_model_lower
+            try:
+                async for chunk in self._stream_chat_inner(
+                    messages,
+                    tools,
+                    _model=effective_model,
+                ):
+                    yield chunk
+                return
+            except Exception:
+                logger.warning("Streaming call failed, retrying once", exc_info=True)
 
-        # Retry streaming once
-        if swap_model:
-            self.model = routed_model
-            self._model_lower = routed_model.lower()
-        try:
-            async for chunk in self._stream_chat_inner(messages, tools):
-                yield chunk
-            return
-        except Exception:
-            logger.warning("Streaming retry failed, falling back to batch", exc_info=True)
-        finally:
-            if swap_model:
-                self.model = original_model
-                self._model_lower = original_model_lower
+            # Retry streaming once
+            try:
+                async for chunk in self._stream_chat_inner(
+                    messages,
+                    tools,
+                    _model=effective_model,
+                ):
+                    yield chunk
+                return
+            except Exception:
+                logger.warning("Streaming retry failed, falling back to batch", exc_info=True)
 
-        # Fall back to batch with full retry/fallback chain
-        response = await self.chat(messages=messages, tools=tools, task_type=task_type)
-        yield response
+            # Fall back to batch with full retry/fallback chain; chat()
+            # re-scopes the contextvar itself, so attribution stays correct.
+            response = await self.chat(messages=messages, tools=tools, task_type=task_type)
+            yield response
+        finally:
+            _TASK_TYPE.reset(token)
 
     async def _stream_chat_inner(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        *,
+        _model: str | None = None,
     ) -> AsyncGenerator[ChatResponse, None]:
-        """Inner streaming body — assumes ``self.model`` is already routed."""
-        effective = self._effective_model()
+        """Inner streaming body — uses the resolved model passed via *_model*."""
+        effective = self._effective_model(_model)
+        effective_lower = effective.lower()
 
         # Apply prompt caching for supported providers (same as _call())
         cached_messages = self._apply_prompt_caching(effective, messages)
@@ -886,7 +1044,7 @@ class LLMClient:
             "timeout": self.timeout,
         }
         if tools:
-            if self._supports_tool_calling():
+            if self._supports_tool_calling(effective_lower):
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
             else:
@@ -905,6 +1063,16 @@ class LLMClient:
                     "thinking_budget": self.thinking_budget,
                 }
 
+        if self.reasoning_effort:
+            if "extra_body" in kwargs:
+                kwargs["extra_body"]["reasoning_effort"] = self.reasoning_effort
+            else:
+                kwargs["reasoning_effort"] = self.reasoning_effort
+
+        _running_input_tokens = 0
+        _running_output_tokens = 0
+        _streaming_heuristic_cost = 0.0
+        _ledger_recorded = False
         try:
             response = await _get_litellm().acompletion(**kwargs)
             _content_chunks: list[str] = []
@@ -918,6 +1086,11 @@ class LLMClient:
 
                 if delta.content:
                     _content_chunks.append(delta.content)
+                    _running_output_tokens += 1  # rough per-chunk heuristic
+                    chunk_cost = estimate_cost(effective, 0, 1)
+                    _streaming_heuristic_cost += chunk_cost
+                    self.total_cost_usd += chunk_cost
+                    self._check_budget()
                     yield ChatResponse(
                         content=delta.content,
                         tool_calls=[],
@@ -959,9 +1132,31 @@ class LLMClient:
                             }
                         )
 
-                    chunk_usage = {}
+                    chunk_usage: dict[str, int] = {}
                     if hasattr(chunk, "usage") and chunk.usage:
                         chunk_usage = dict(chunk.usage)
+                        _running_input_tokens = getattr(chunk.usage, "prompt_tokens", 0) or 0
+                        _running_output_tokens = getattr(chunk.usage, "completion_tokens", 0) or 0
+                        cached_tokens = getattr(chunk.usage, "cache_read_input_tokens", 0) or 0
+                        # Replace heuristic with authoritative: subtract interim, add real
+                        self.total_cost_usd -= _streaming_heuristic_cost
+                        self.total_input_tokens += _running_input_tokens
+                        self.total_output_tokens += _running_output_tokens
+                        call_cost = estimate_cost(
+                            effective,
+                            _running_input_tokens,
+                            _running_output_tokens,
+                            cached_input_tokens=cached_tokens,
+                        )
+                        self.total_cost_usd += call_cost
+                        self._check_budget()
+                        self._record_usage(
+                            task_type=_TASK_TYPE.get(),
+                            input_tokens=_running_input_tokens,
+                            output_tokens=_running_output_tokens,
+                            cost_usd=call_cost,
+                        )
+                        _ledger_recorded = True
 
                     collected_content = "".join(_content_chunks)
 
@@ -994,7 +1189,21 @@ class LLMClient:
                     finish_reason="incomplete",
                     usage={},
                 )
+            if not _ledger_recorded:
+                self._record_usage(
+                    task_type=_TASK_TYPE.get(),
+                    input_tokens=0,
+                    output_tokens=_running_output_tokens,
+                    cost_usd=_streaming_heuristic_cost,
+                )
 
         except Exception as exc:
             logger.error("Streaming LLM call failed: %s", exc, exc_info=True)
+            if not _ledger_recorded:
+                self._record_usage(
+                    task_type=_TASK_TYPE.get(),
+                    input_tokens=_running_input_tokens,
+                    output_tokens=_running_output_tokens,
+                    cost_usd=_streaming_heuristic_cost,
+                )
             raise

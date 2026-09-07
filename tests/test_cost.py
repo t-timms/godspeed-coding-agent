@@ -53,6 +53,31 @@ class TestEstimateCost:
         cost = estimate_cost("claude-sonnet-4-20250514", 0, 0)
         assert cost == 0.0
 
+    def test_cached_tokens_discount(self) -> None:
+        # 1M input: 600k cached at 10% + 400k normal = 0.6*0.3 + 0.4*3.0 = 0.18 + 1.2 = 1.38
+        cost = estimate_cost("claude-sonnet-4-20250514", 1_000_000, 0, cached_input_tokens=600_000)
+        assert abs(cost - 1.38) < 0.001
+
+    def test_cached_tokens_all_cached(self) -> None:
+        # All 1M tokens cached: 1M * $3/M * 0.10 = $0.30
+        cost = estimate_cost(
+            "claude-sonnet-4-20250514", 1_000_000, 0, cached_input_tokens=1_000_000
+        )
+        assert abs(cost - 0.30) < 0.001
+
+    def test_cached_tokens_capped_to_input(self) -> None:
+        # cached > input should be clamped
+        cost = estimate_cost("claude-sonnet-4-20250514", 500_000, 0, cached_input_tokens=900_000)
+        cost_all_cached = estimate_cost(
+            "claude-sonnet-4-20250514", 500_000, 0, cached_input_tokens=500_000
+        )
+        assert abs(cost - cost_all_cached) < 0.0001
+
+    def test_cached_tokens_negative_clamped(self) -> None:
+        cost = estimate_cost("claude-sonnet-4-20250514", 1000, 0, cached_input_tokens=-500)
+        cost_no_cache = estimate_cost("claude-sonnet-4-20250514", 1000, 0)
+        assert abs(cost - cost_no_cache) < 0.0001
+
 
 class TestFormatCost:
     """Test cost formatting."""

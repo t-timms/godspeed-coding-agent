@@ -20,7 +20,7 @@ _MODEL_PRICING: dict[str, tuple[float, float]] = {
     # Anthropic Claude
     "claude-opus": (15.0, 75.0),
     "claude-sonnet": (3.0, 15.0),
-    "claude-haiku": (0.25, 1.25),
+    "claude-haiku": (0.80, 4.00),
     # OpenAI
     "gpt-4o": (2.50, 10.0),
     "gpt-4o-mini": (0.15, 0.60),
@@ -76,16 +76,22 @@ def estimate_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    cached_input_tokens: int = 0,
 ) -> float:
     """Estimate the cost of an LLM call in USD.
 
     Returns 0.0 for local/free models or unknown pricing.
     Negative token counts are clamped to 0.
+    ``cached_input_tokens`` are charged at 10% of the standard input rate
+    (Anthropic/DeepSeek prompt-caching discount).
     """
     if input_tokens < 0:
         input_tokens = 0
     if output_tokens < 0:
         output_tokens = 0
+    if cached_input_tokens < 0:
+        cached_input_tokens = 0
+    cached_input_tokens = min(cached_input_tokens, input_tokens)
 
     model_lower = model.lower()
 
@@ -100,9 +106,11 @@ def estimate_cost(
     if inp_price == 0.0 and out_price == 0.0 and name != "":
         logger.debug("Unknown model pricing for %r — cost estimate is 0.0", model)
 
-    input_cost = (input_tokens / 1_000_000) * inp_price
+    non_cached = max(0, input_tokens - cached_input_tokens)
+    input_cost = (non_cached / 1_000_000) * inp_price
+    cached_cost = (cached_input_tokens / 1_000_000) * inp_price * 0.10
     output_cost = (output_tokens / 1_000_000) * out_price
-    return input_cost + output_cost
+    return input_cost + cached_cost + output_cost
 
 
 def get_cheapest_model(models: list[str]) -> str:

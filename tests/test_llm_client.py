@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1337,3 +1338,260 @@ class TestLLMClientTokenTracking:
         assert client._is_anthropic_model("anthropic/claude-opus") is True
         client2 = LLMClient(model="gpt-4o")
         assert client2._is_anthropic_model() is False
+
+
+class TestStreamingCostNoDoubleCount:
+    """Streaming path must not double-count cost when final usage is present."""
+
+    @pytest.mark.asyncio
+    async def test_cumulative_usage_replaces_heuristic_cost(self) -> None:
+        from godspeed.llm.cost import estimate_cost
+
+        model = "claude-sonnet-4-20250514"
+        client = LLMClient(model=model)
+
+        final_input = 100
+        final_output = 200
+
+        class CumulativeUsageStream:
+            def __init__(self):
+                self._idx = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx >= 4:
+                    raise StopAsyncIteration
+                self._idx += 1
+                if self._idx < 4:
+                    delta = SimpleNamespace(content=f"chunk{self._idx}", tool_calls=None)
+                    return SimpleNamespace(
+                        choices=[SimpleNamespace(delta=delta, finish_reason=None)]
+                    )
+                usage = MagicMock(
+                    prompt_tokens=final_input,
+                    completion_tokens=final_output,
+                    cache_read_input_tokens=0,
+                    __iter__=lambda s: iter(
+                        [("prompt_tokens", final_input), ("completion_tokens", final_output)]
+                    ),
+                )
+                delta = SimpleNamespace(content="", tool_calls=None)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(delta=delta, finish_reason="stop")],
+                    usage=usage,
+                )
+
+            async def aclose(self):
+                pass
+
+        with patch("godspeed.llm.client._get_litellm") as mock_litellm:
+            mock_litellm.return_value.acompletion = AsyncMock(return_value=CumulativeUsageStream())
+            chunks = []
+            async for chunk in client._stream_chat_inner([{"role": "user", "content": "hi"}], None):
+                chunks.append(chunk)
+
+        expected_cost = estimate_cost(model, final_input, final_output)
+        assert abs(client.total_cost_usd - expected_cost) < 1e-9
+        assert client.total_input_tokens == final_input
+        assert client.total_output_tokens == final_output
+
+    @pytest.mark.asyncio
+    async def test_no_final_usage_keeps_heuristic_cost(self) -> None:
+        from godspeed.llm.cost import estimate_cost
+
+        model = "claude-sonnet-4-20250514"
+        client = LLMClient(model=model)
+
+        class NoUsageStream:
+            def __init__(self):
+                self._idx = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self._idx >= 3:
+                    raise StopAsyncIteration
+                self._idx += 1
+                delta = SimpleNamespace(content=f"tok{self._idx}", tool_calls=None)
+                return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)])
+
+            async def aclose(self):
+                pass
+
+        with patch("godspeed.llm.client._get_litellm") as mock_litellm:
+            mock_litellm.return_value.acompletion = AsyncMock(return_value=NoUsageStream())
+            chunks = []
+            async for chunk in client._stream_chat_inner([{"role": "user", "content": "hi"}], None):
+                chunks.append(chunk)
+
+        heuristic_per_chunk = estimate_cost(model, 0, 1)
+        assert abs(client.total_cost_usd - 3 * heuristic_per_chunk) < 1e-9
+        assert client.total_input_tokens == 0
+        assert client.total_output_tokens == 0
+
+
+# ---------------------------------------------------------------------------
+# Test: with_model contextmanager + immutable routing
+# ---------------------------------------------------------------------------
+
+
+class TestWithModel:
+    """with_model() temporarily overrides self.model and restores it."""
+
+    def test_restores_model_after_block(self) -> None:
+        client = LLMClient(model="main-model")
+        with client.with_model("plan-model"):
+            assert client.model == "plan-model"
+            assert client._model_lower == "plan-model"
+        assert client.model == "main-model"
+        assert client._model_lower == "main-model"
+
+    def test_restores_model_on_exception(self) -> None:
+        client = LLMClient(model="main-model")
+        with pytest.raises(RuntimeError, match="boom"):
+            with client.with_model("plan-model"):
+                raise RuntimeError("boom")
+        assert client.model == "main-model"
+        assert client._model_lower == "main-model"
+
+    def test_same_model_is_noop(self) -> None:
+        client = LLMClient(model="main-model")
+        with client.with_model("main-model"):
+            assert client.model == "main-model"
+        assert client.model == "main-model"
+
+
+class TestResolveModel:
+    """_resolve_model() returns routed model without mutating shared state."""
+
+    def test_returns_routed_model(self) -> None:
+        router = ModelRouter({"plan": "claude-sonnet-4"})
+        client = LLMClient(model="gpt-4o", router=router)
+        model, lower = client._resolve_model("plan")
+        assert model == "claude-sonnet-4"
+        assert lower == "claude-sonnet-4"
+        # No mutation.
+        assert client.model == "gpt-4o"
+        assert client._model_lower == "gpt-4o"
+
+    def test_returns_default_when_unrouted(self) -> None:
+        router = ModelRouter({"plan": "claude-sonnet-4"})
+        client = LLMClient(model="gpt-4o", router=router)
+        model, lower = client._resolve_model("chat")
+        assert model == "gpt-4o"
+        assert lower == "gpt-4o"
+
+
+class TestConcurrentRouting:
+    """Concurrent chat() calls with different task types must not corrupt
+    each other's model selection (regression for the shared-state race)."""
+
+    @pytest.mark.asyncio
+    async def test_concurrent_chat_uses_correct_model_per_call(self) -> None:
+        router = ModelRouter({"plan": "claude-sonnet-4", "edit": "gpt-4o"})
+        client = LLMClient(model="ollama/qwen3:4b", router=router)
+
+        seen: dict[str, str] = {}
+
+        async def _capture(*args: object, **kwargs: object) -> ChatResponse:
+            model = kwargs.get("_model")
+            assert model is not None
+            seen[model] = model
+            # Simulate an await point where another coroutine could interleave.
+            await asyncio.sleep(0)
+            return ChatResponse(content="ok", finish_reason="stop")
+
+        client._chat_with_fallback = AsyncMock(side_effect=_capture)
+
+        await asyncio.gather(
+            client.chat([{"role": "user", "content": "plan"}], task_type="plan"),
+            client.chat([{"role": "user", "content": "edit"}], task_type="edit"),
+            client.chat([{"role": "user", "content": "chat"}]),
+        )
+
+        # Each call resolved its own model; no cross-contamination.
+        assert seen == {
+            "claude-sonnet-4": "claude-sonnet-4",
+            "gpt-4o": "gpt-4o",
+            "ollama/qwen3:4b": "ollama/qwen3:4b",
+        }
+        # Shared state untouched.
+        assert client.model == "ollama/qwen3:4b"
+        assert client._model_lower == "ollama/qwen3:4b"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_stream_uses_correct_model_per_call(self) -> None:
+        router = ModelRouter({"plan": "claude-sonnet-4", "edit": "gpt-4o"})
+        client = LLMClient(model="ollama/qwen3:4b", router=router)
+
+        seen: dict[str, str] = {}
+
+        async def _capture(self, msgs, tools=None, **kwargs):
+            model = kwargs.get("_model")
+            assert model is not None
+            seen[model] = model
+            await asyncio.sleep(0)
+            yield ChatResponse(content="ok", finish_reason="stop")
+
+        client._stream_chat_inner = _capture.__get__(client)
+
+        async def _consume(task_type: str | None) -> None:
+            async for _chunk in client.stream_chat(
+                [{"role": "user", "content": "x"}], task_type=task_type
+            ):
+                pass
+
+        await asyncio.gather(
+            _consume("plan"),
+            _consume("edit"),
+            _consume(None),
+        )
+
+        assert seen == {
+            "claude-sonnet-4": "claude-sonnet-4",
+            "gpt-4o": "gpt-4o",
+            "ollama/qwen3:4b": "ollama/qwen3:4b",
+        }
+        assert client.model == "ollama/qwen3:4b"
+
+
+class TestPromptCachingBreakpoints:
+    def test_max_four_breakpoints_long_conversation(self) -> None:
+        messages = [{"role": "user", "content": f"m{i}"} for i in range(12)]
+        out = LLMClient._apply_prompt_caching("claude-sonnet-4-5", messages)
+        marked = [m for m in out if isinstance(m.get("content"), list)]
+        assert len(marked) == 3
+        assert isinstance(out[-1]["content"], str)
+
+    def test_short_conversation_caches_stable_prefix_only(self) -> None:
+        messages = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+        ]
+        out = LLMClient._apply_prompt_caching("claude-sonnet-4-5", messages)
+        assert isinstance(out[0]["content"], list)
+        assert isinstance(out[1]["content"], str)
+
+
+class TestDeriveClient:
+    def test_derive_pins_model_and_caps_budget_to_remaining(self) -> None:
+        parent = LLMClient(model="main-model", max_cost_usd=1.0)
+        parent.total_cost_usd = 0.4
+        child = parent.derive("architect-model")
+        assert child.model == "architect-model"
+        assert child.total_cost_usd == 0.0
+        assert child.max_cost_usd == 0.6
+
+    def test_adopt_folds_delta_into_parent(self) -> None:
+        parent = LLMClient(model="main")
+        child = parent.derive("other")
+        child.total_input_tokens = 50
+        child.total_output_tokens = 20
+        child.total_cost_usd = 0.05
+        parent.adopt(child)
+        assert parent.total_input_tokens == 50
+        assert parent.total_output_tokens == 20
+        assert parent.total_cost_usd == 0.05
