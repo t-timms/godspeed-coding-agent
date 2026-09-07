@@ -14,6 +14,7 @@ import threading
 import time
 
 from godspeed.security.dangerous import detect_dangerous_command
+from godspeed.security.plan_gate import PLAN_GATE_TOOL_NAME
 from godspeed.security.rules import RuleAction, parse_rules
 from godspeed.tools.base import RiskLevel, ToolCall
 
@@ -126,8 +127,10 @@ class PermissionEngine:
 
         Returns a PermissionDecision with action and reason.
         """
-        # Plan mode: block everything except READ_ONLY tools
-        if self.plan_mode:
+        # Plan mode: block everything except READ_ONLY tools. The plan-exit
+        # gate is explicitly exempt so the agent can always request approval
+        # to leave plan mode, regardless of its declared risk level.
+        if self.plan_mode and tool_call.tool_name != PLAN_GATE_TOOL_NAME:
             risk = self._tool_risk_levels.get(tool_call.tool_name, RiskLevel.HIGH)
             if risk != RiskLevel.READ_ONLY:
                 return PermissionDecision(DENY, "Plan mode active — read-only tools only")

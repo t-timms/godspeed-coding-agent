@@ -209,3 +209,22 @@ class TestShannonEntropy:
         # Two equally frequent chars = 1 bit
         entropy = _shannon_entropy("abababab")
         assert abs(entropy - 1.0) < 0.01
+
+
+class TestSigV4AndUrlQuerySecrets:
+    def test_sigv4_header_detected(self) -> None:
+        from godspeed.security.secrets import detect_secrets
+
+        text = (
+            "Authorization: AWS4-HMAC-SHA256 "
+            "Credential=AKIAIOSFODNN7EXAMPLE/20260901/us-east-1/s3/aws4_request"
+        )
+        types = {finding.secret_type for finding in detect_secrets(text)}
+        assert "aws_sigv4_header" in types
+
+    def test_url_query_secret_detected(self) -> None:
+        from godspeed.security.secrets import detect_secrets
+
+        text = "https://api.example.com/v1?api_key=abcdef1234567890abcdef1234567890"
+        types = {finding.secret_type for finding in detect_secrets(text)}
+        assert "url_query_secret" in types

@@ -121,7 +121,10 @@ DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # find/xargs destructive
     (re.compile(r"find\s+.*-exec\s+"), "find with exec"),
     (re.compile(r"find\s+.*-delete"), "find with delete"),
-    (re.compile(r"xargs\s+.*rm"), "xargs with rm"),
+    (
+        re.compile(r"xargs\s+.*(?:\brm\b|\bdd\b|\bmkfs\b|\bsh\b|\bbash\b)"),
+        "xargs with destructive command",
+    ),
     # awk/system execution
     (re.compile(r"awk\s+.*system\s*\("), "awk system() call"),
     # Network/firewall manipulation
@@ -214,6 +217,34 @@ DANGEROUS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"(?:perl|sed)\s+-i\b"), "in-place file editing"),
     (re.compile(r"chattr\s+[+-]i\b"), "immutable file attribute change"),
     (re.compile(r"cat\s+/dev/null\s*>\s*"), "file truncation via /dev/null"),
+    # PowerShell -e / -ec aliases (shorter forms of -EncodedCommand that bypass -enc pattern)
+    (
+        re.compile(r"\bpowershell\b.*\s-[eE]c?\s+\S"),
+        "PowerShell encoded command alias (-e/-ec)",
+    ),
+    # Invoke-Expression / iex
+    (
+        re.compile(r"\b(?:iex|Invoke-Expression)\b", re.IGNORECASE),
+        "PowerShell Invoke-Expression",
+    ),
+    # Variable assigned to dangerous command (bypass: c=rm;$c -rf /)
+    (
+        re.compile(
+            r"\b\w+\s*=\s*(?:rm|dd|mkfs|curl|wget|python[23]?|bash|sh|perl|ruby)"
+            r"\s*[;&|]"
+        ),
+        "variable assigned to dangerous command",
+    ),
+    # Variable dereference used as command with destructive flags (bypass: $c -rf /)
+    (
+        re.compile(r"\$\w+\s+-[a-zA-Z]*[rf]\s+[/~]"),
+        "command executed via variable dereference",
+    ),
+    # ${} expansion used as command (bypass: ${VAR:-rm} -rf /)
+    (
+        re.compile(r"\$\{[^}]*\}\s+-[a-zA-Z]*[rf]\s+[/~]"),
+        "command executed via ${} variable expansion",
+    ),
 ]
 
 
@@ -402,6 +433,17 @@ _DANGEROUS_KEYWORDS: frozenset[str] = frozenset(
         "awk ",
         "tee /etc/",
         "$(echo rm)",
+        "xargs dd",
+        "xargs mkfs",
+        "xargs sh ",
+        "xargs bash",
+        # PowerShell -e/-ec encoded command aliases
+        "powershell",
+        "powershell -e ",
+        "powershell -ec ",
+        # PowerShell Invoke-Expression
+        "iex ",
+        "invoke-expression",
     }
 )
 
@@ -412,20 +454,42 @@ _DANGEROUS_KEYWORDS_LOWER: frozenset[str] = frozenset(kw.lower() for kw in _DANG
 def _likely_dangerous(command: str) -> bool:
     """Fast pre-check: does the command contain any dangerous indicators?
 
-    Uses pre-computed lowercase keywords to avoid repeated .lower() calls.
-    Normalizes whitespace so "git   push   --force" matches "git push --force".
-    Returns True immediately on first match for short-circuit evaluation.
+    Normalizes whitespace, folds homoglyph lookalikes to ASCII, and
+    lowercases — Cyrillic/Greek lookalike characters must not bypass
+    keyword matching. Returns True immediately on first match.
     """
-    # Single .lower() call upfront, collapse multiple whitespace to single space
-    cmd_lower = " ".join(command.lower().split())
+    cmd_lower = _normalize_command(command)
 
-    # Pipes/semicolons indicate command chaining — always check via regex
-    if "|" in cmd_lower or ";" in cmd_lower:
+    # Command chaining / substitution indicators — always force full regex scan.
+    # These are common obfuscation vectors: $(), ${}, backticks, &&, |, ;
+    if any(tok in cmd_lower for tok in ("|", ";", "&&", "$(", "${")):
+        return True
+    # Backtick command substitution (not affected by .lower())
+    if "`" in cmd_lower:
         return True
 
     # Check against pre-computed lowercase keywords
     # Generator expression with any() short-circuits on first match
     return any(kw in cmd_lower for kw in _DANGEROUS_KEYWORDS_LOWER)
+
+
+_HOMOGLYPH_TABLE: dict[str, str] = str.maketrans(
+    "аеорсухкмтвнοαερνκτι",
+    "aeorcyxkmtvnoaepvkti",
+)
+
+
+def _fold_homoglyphs(command: str) -> str:
+    """NFKD-normalize and fold homoglyph lookalikes to ASCII, case preserved."""
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFKD", command)
+    return decomposed.translate(_HOMOGLYPH_TABLE)
+
+
+def _normalize_command(command: str) -> str:
+    """Lowercase, collapse whitespace, and fold homoglyph lookalikes."""
+    return " ".join(_fold_homoglyphs(command).lower().split())
 
 
 def detect_dangerous_command(command: str) -> list[str]:
@@ -439,9 +503,10 @@ def detect_dangerous_command(command: str) -> list[str]:
     """
     if not _likely_dangerous(command):
         return []
+    folded = _fold_homoglyphs(command)
     dangers = []
     for pattern, description in DANGEROUS_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(folded):
             dangers.append(description)
     return dangers
 
@@ -453,4 +518,5 @@ def is_dangerous(command: str) -> bool:
     """
     if not _likely_dangerous(command):
         return False
-    return any(pattern.search(command) for pattern, _ in DANGEROUS_PATTERNS)
+    folded = _fold_homoglyphs(command)
+    return any(pattern.search(folded) for pattern, _ in DANGEROUS_PATTERNS)
