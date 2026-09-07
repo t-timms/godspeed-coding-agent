@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_GLOBAL_DIR = Path.home() / ".godspeed"
 
+# Schema version for settings.yaml — bump when adding/removing top-level keys
+# so unknown-key warnings can distinguish "newer config" from typos.
+CONFIG_SCHEMA_VERSION = 1
+
 # YAML config cache: path -> (mtime, data)
 # Bounded to 32 entries with LRU eviction to avoid unbounded growth in
 # long-running processes while keeping frequently-accessed configs hot.
@@ -50,6 +54,30 @@ def _load_yaml_cached(path: Path) -> dict[str, Any] | None:
 _PERMISSION_MODES = ("strict", "normal", "yolo")
 _SANDBOX_MODES = ("none", "docker")
 _EXECUTION_MODES = ("tool", "codeact")
+
+
+class PermissionMode(StrEnum):
+    """Permission enforcement tier.
+
+    ``strict``:  Deny-first, every tool call requires approval.
+    ``normal``:  Default — allow/deny/ask rules apply.
+    ``yolo``:    No permission checks (INSECURE).
+    """
+
+    STRICT = "strict"
+    NORMAL = "normal"
+    YOLO = "yolo"
+
+
+class SandboxMode(StrEnum):
+    """Sandboxing strategy for tool execution.
+
+    ``none``:   No sandboxing.
+    ``docker``: Run tools inside a Docker container.
+    """
+
+    NONE = "none"
+    DOCKER = "docker"
 
 
 class ExecutionMode(StrEnum):
@@ -190,6 +218,49 @@ class ContextSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
 
+class SandboxSettings(BaseSettings):
+    """Sandboxing configuration for tool execution."""
+
+    mode: SandboxMode = SandboxMode.NONE
+    image: str = "python:3.12-slim"
+    timeout_seconds: int = 120
+    network_enabled: bool = False
+
+    blocked_paths: list[str] = Field(default_factory=list)
+    writable_paths: list[str] = Field(default_factory=list)
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+
+class StatuslineSettings(BaseSettings):
+    """Statusline (per-turn HUD) configuration.
+
+    When ``enabled`` and a ``template`` is set, the HUD renders the template
+    with ``{model}``, ``{tokens}``, ``{cost}``, and ``{branch}`` placeholders.
+    An empty template uses the built-in default. Disabled (default) keeps the
+    standard HUD.
+    """
+
+    enabled: bool = False
+    template: str = ""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+
+class BatchSettings(BaseSettings):
+    """Batch execution configuration for ``/batch`` and ``godspeed batch``.
+
+    Controls default parallelism, PR creation, and worktree location for
+    parallel worktree-based task decomposition runs.
+    """
+
+    parallelism: int = 5
+    open_pr: bool = False
+    worktree_dir: str = ""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+
 class GodspeedSettings(BaseSettings):
     """Root configuration for Godspeed."""
 
@@ -214,7 +285,7 @@ class GodspeedSettings(BaseSettings):
     global_dir: Path = DEFAULT_GLOBAL_DIR
 
     # Security
-    permission_mode: str = "normal"  # "strict" | "normal" | "yolo"
+    permission_mode: PermissionMode = PermissionMode.NORMAL
 
     # Context
     max_context_tokens: int = 100_000
@@ -251,7 +322,7 @@ class GodspeedSettings(BaseSettings):
     github_actions: dict[str, Any] = Field(default_factory=dict)
 
     # Agent behavior
-    execution_mode: str = "tool"  # "tool" | "codeact"
+    execution_mode: ExecutionMode = ExecutionMode.TOOL
     parallel_tool_calls: bool = True
     auto_fix_retries: int = 3  # lint-fix retry rounds (0 = one-shot, no auto-fix)
     auto_commit: bool = False
@@ -264,6 +335,15 @@ class GodspeedSettings(BaseSettings):
     auto_stash_threshold: int = 3  # consecutive writes before auto-stash
     must_fix_cap: int = 3  # max must-fix injections per session
     max_speculative_cache_size: int = 10  # max concurrent speculative tasks per iteration
+
+    # Per-session lifetime caps (Claude Code parity)
+    max_spawns_per_session: int = 200
+    max_web_calls_per_session: int = 200
+    session_timeout_seconds: int = 0  # 0 = no wall-clock limit
+    stagger_seconds: float = 0.25  # sibling spawn stagger for prompt-cache prefixes
+
+    # MCP servers whose tools get MEDIUM risk (untrusted servers default HIGH)
+    mcp_trusted_servers: list[str] = Field(default_factory=list)
 
     # Thinking — extended thinking for Anthropic/Claude models
     thinking_budget: int = 0  # 0 = disabled; >0 = budget_tokens for thinking blocks
@@ -289,7 +369,7 @@ class GodspeedSettings(BaseSettings):
     strong_model: str = ""
 
     # Sandboxing
-    sandbox: str = "none"  # "none" | "docker"
+    sandbox: SandboxMode = SandboxMode.NONE
 
     # Self-evolution — learn from execution traces to improve prompts/tools
     evolution_enabled: bool = False  # enable with /evolve or config
@@ -313,10 +393,19 @@ class GodspeedSettings(BaseSettings):
     permissions: PermissionSettings = Field(default_factory=PermissionSettings)
     audit: AuditSettings = Field(default_factory=AuditSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
+    sandbox_settings: SandboxSettings = Field(default_factory=SandboxSettings)
+    statusline: StatuslineSettings = Field(default_factory=StatuslineSettings)
+    batch: BatchSettings = Field(default_factory=BatchSettings)
 
-    @field_validator("permission_mode")
+    @model_validator(mode="after")
+    def reconcile_sandbox_modes(self) -> GodspeedSettings:
+        if self.sandbox != SandboxMode.NONE and self.sandbox_settings.mode == SandboxMode.NONE:
+            self.sandbox_settings.mode = self.sandbox
+        return self
+
+    @field_validator("permission_mode", mode="before")
     @classmethod
-    def validate_permission_mode(cls, v: str) -> str:
+    def validate_permission_mode(cls, v: Any) -> Any:
         if v not in _PERMISSION_MODES:
             msg = f"permission_mode must be one of {_PERMISSION_MODES}, got {v!r}"
             raise ValueError(msg)
@@ -330,17 +419,17 @@ class GodspeedSettings(BaseSettings):
             raise ValueError(msg)
         return v.strip()
 
-    @field_validator("sandbox")
+    @field_validator("sandbox", mode="before")
     @classmethod
-    def validate_sandbox(cls, v: str) -> str:
+    def validate_sandbox(cls, v: Any) -> Any:
         if v not in _SANDBOX_MODES:
             msg = f"sandbox must be one of {_SANDBOX_MODES}, got {v!r}"
             raise ValueError(msg)
         return v
 
-    @field_validator("execution_mode")
+    @field_validator("execution_mode", mode="before")
     @classmethod
-    def validate_execution_mode(cls, v: str) -> str:
+    def validate_execution_mode(cls, v: Any) -> Any:
         if v not in _EXECUTION_MODES:
             msg = f"execution_mode must be one of {_EXECUTION_MODES}, got {v!r}"
             raise ValueError(msg)
@@ -520,6 +609,9 @@ class GodspeedSettings(BaseSettings):
         except yaml.YAMLError as exc:
             logger.warning("Malformed project settings.yaml: %s — skipping", exc)
 
+        # Warn on unknown top-level keys (typos / newer configs)
+        _warn_unknown_keys(merged)
+
         # Env vars / constructor args take final precedence
         merged.update({k: v for k, v in data.items() if v is not None})
         return merged
@@ -601,6 +693,202 @@ def append_allow_rule(pattern: str, project_dir: Path | None = None) -> bool:
     return append_permission_rule(pattern, "allow", project_dir) is not None
 
 
+def append_mcp_server(
+    entry: dict[str, Any],
+    project_dir: Path | None = None,
+    *,
+    force: bool = False,
+) -> Path | None:
+    """Add or replace an MCP server entry in ``settings.yaml``.
+
+    Reads existing YAML, adds *entry* under the ``mcp_servers`` list, writes
+    back. Preserves existing content. When a server with the same ``name``
+    already exists and ``force`` is False, raises :class:`ValueError`; with
+    ``force=True`` the existing entry is replaced in place.
+
+    Args:
+        entry: MCP server dict (``name``, ``transport``, ``command``, ``args``,
+            ``env``, ``url``, ...). Must include a ``name`` key.
+        project_dir: Project directory for ``.godspeed/settings.yaml``.
+            Falls back to the global settings file when ``None``.
+        force: Replace an existing entry with the same name instead of erroring.
+
+    Returns:
+        The :class:`Path` written on success, or ``None`` on OS error.
+
+    Raises:
+        ValueError: if *entry* has no ``name``, or a server with the same name
+            already exists and ``force`` is False.
+    """
+    name = entry.get("name")
+    if not name:
+        msg = "MCP server entry requires a 'name' key"
+        raise ValueError(msg)
+
+    if project_dir is not None:
+        settings_path = project_dir / ".godspeed" / "settings.yaml"
+    else:
+        settings_path = DEFAULT_GLOBAL_DIR / "settings.yaml"
+
+    try:
+        if settings_path.exists() and settings_path.is_file():
+            with open(settings_path, encoding="utf-8") as f:
+                try:
+                    data = yaml.safe_load(f) or {}
+                except yaml.YAMLError as exc:
+                    logger.warning("Malformed %s: %s — rebuilding", settings_path, exc)
+                    data = {}
+        else:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+
+        servers = data.setdefault("mcp_servers", [])
+        if not isinstance(servers, list):
+            logger.warning("Corrupted mcp_servers list — rebuilding")
+            servers = []
+            data["mcp_servers"] = servers
+
+        replaced = False
+        for i, existing in enumerate(servers):
+            if isinstance(existing, dict) and existing.get("name") == name:
+                if not force:
+                    msg = f"MCP server '{name}' already exists (use --force to replace)"
+                    raise ValueError(msg)
+                servers[i] = entry
+                replaced = True
+                break
+        if not replaced:
+            servers.append(entry)
+
+        with open(settings_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+
+        logger.info("Wrote MCP server '%s' to %s", name, settings_path)
+        return settings_path
+    except OSError as exc:
+        logger.warning("Failed to write MCP server '%s': %s", name, exc)
+        return None
+
+
+def remove_mcp_server(
+    name: str,
+    project_dir: Path | None = None,
+) -> tuple[bool, Path | None]:
+    """Remove an MCP server entry by name from ``settings.yaml``.
+
+    Args:
+        name: Name of the MCP server to remove.
+        project_dir: Project directory for ``.godspeed/settings.yaml``.
+            Falls back to the global settings file when ``None``.
+
+    Returns:
+        A ``(found, path)`` tuple. ``found`` is True when an entry was removed;
+        ``path`` is the settings file written, or ``None`` when the file was
+        missing/malformed or an OS error occurred.
+    """
+    if project_dir is not None:
+        settings_path = project_dir / ".godspeed" / "settings.yaml"
+    else:
+        settings_path = DEFAULT_GLOBAL_DIR / "settings.yaml"
+
+    try:
+        if not settings_path.exists() or not settings_path.is_file():
+            return False, None
+        with open(settings_path, encoding="utf-8") as f:
+            try:
+                data = yaml.safe_load(f) or {}
+            except yaml.YAMLError as exc:
+                logger.warning("Malformed %s: %s", settings_path, exc)
+                return False, None
+        if not isinstance(data, dict):
+            return False, None
+
+        servers = data.get("mcp_servers")
+        if not isinstance(servers, list):
+            return False, None
+
+        new_servers = [s for s in servers if not (isinstance(s, dict) and s.get("name") == name)]
+        if len(new_servers) == len(servers):
+            return False, None
+
+        if new_servers:
+            data["mcp_servers"] = new_servers
+        else:
+            data.pop("mcp_servers", None)
+
+        with open(settings_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+
+        logger.info("Removed MCP server '%s' from %s", name, settings_path)
+        return True, settings_path
+    except OSError as exc:
+        logger.warning("Failed to remove MCP server '%s': %s", name, exc)
+        return False, None
+
+
+_KNOWN_TOP_LEVEL_KEYS = frozenset(
+    {
+        "model",
+        "fallback_models",
+        "project_dir",
+        "global_dir",
+        "permission_mode",
+        "max_context_tokens",
+        "compaction_threshold",
+        "routing",
+        "mcp_servers",
+        "hooks",
+        "github_actions",
+        "execution_mode",
+        "parallel_tool_calls",
+        "auto_fix_retries",
+        "auto_commit",
+        "auto_commit_threshold",
+        "max_iterations",
+        "max_retries",
+        "stuck_loop_threshold",
+        "auto_stash_threshold",
+        "must_fix_cap",
+        "max_speculative_cache_size",
+        "thinking_budget",
+        "max_cost_usd",
+        "reasoning_effort",
+        "architect_model",
+        "cheap_model",
+        "strong_model",
+        "sandbox",
+        "sandbox_settings",
+        "evolution_enabled",
+        "evolution_model",
+        "evolution_max_cost_usd",
+        "evolution_min_sessions",
+        "log_conversations",
+        "memory_enabled",
+        "auto_index",
+        "permissions",
+        "audit",
+        "context",
+        "statusline",
+        "batch",
+    }
+)
+
+
+def _warn_unknown_keys(data: dict[str, Any]) -> None:
+    """Log a warning for unknown top-level config keys (typos / newer configs)."""
+    for key in data:
+        if key not in _KNOWN_TOP_LEVEL_KEYS:
+            logger.warning(
+                "Unknown settings key %r (schema version %d) — ignoring. "
+                "Check for typos or a newer config than this version supports.",
+                key,
+                CONFIG_SCHEMA_VERSION,
+            )
+
+
 def _merge_configs(base: dict[str, Any], override: dict[str, Any]) -> None:
     """Merge override into base. Deny rules are additive (project can't weaken global denies)."""
     for key, value in override.items():
@@ -609,7 +897,7 @@ def _merge_configs(base: dict[str, Any], override: dict[str, Any]) -> None:
             # Deny rules are additive — project can only add more denies
             if "deny" in value:
                 existing = base_perms.get("deny", [])
-                base_perms["deny"] = list(set(existing + value["deny"]))
+                base_perms["deny"] = list(dict.fromkeys(existing + value["deny"]))
             # Allow and ask rules: project overrides global
             if "allow" in value:
                 base_perms["allow"] = value["allow"]

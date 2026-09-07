@@ -605,3 +605,25 @@ class TestAppendPermissionRule:
         result = append_permission_rule("Bash(git *)", "deny")
         assert result == global_dir / "settings.yaml"
         assert result.exists()
+
+class TestSandboxReconcile:
+    """sandbox field syncs into sandbox_settings.mode (single source of truth)."""
+
+    def test_sandbox_docker_promotes_to_settings(self, tmp_path: Path) -> None:
+        s = GodspeedSettings(project_dir=tmp_path, sandbox="docker")
+        assert s.sandbox_settings.mode == "docker"
+
+    def test_explicit_settings_mode_wins(self, tmp_path: Path) -> None:
+        s = GodspeedSettings(
+            project_dir=tmp_path,
+            sandbox="none",
+            sandbox_settings={"mode": "docker"},
+        )
+        assert s.sandbox_settings.mode == "docker"
+
+
+class TestDenyMergeOrder:
+    def test_deny_merge_preserves_order_and_dedupes(self) -> None:
+        base: dict = {"permissions": {"deny": ["B", "A"]}}
+        _merge_configs(base, {"permissions": {"deny": ["C", "A"]}})
+        assert base["permissions"]["deny"] == ["B", "A", "C"]
