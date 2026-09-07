@@ -90,7 +90,10 @@ def _is_ollama_running() -> bool:
     try:
         import urllib.request
 
-        req = urllib.request.Request(OLLAMA_URL, method="GET")  # noqa: S310
+        _url = str(OLLAMA_URL)
+        if not _url.startswith(("http://", "https://")):
+            return False
+        req = urllib.request.Request(_url, method="GET")  # noqa: S310
         with urllib.request.urlopen(req, timeout=2):  # noqa: S310
             return True
     except Exception:
@@ -211,6 +214,8 @@ async def _run_app(
     audit_dir: Path | None,
     permission_mode: str | None = None,
     execution_mode: str = "tool",
+    continue_session: bool = False,
+    resume_session: str | None = None,
 ) -> None:
     """Wire up all components and launch the Textual TUI."""
     from godspeed.config import GodspeedSettings
@@ -228,6 +233,12 @@ async def _run_app(
     effective_project_dir = project_dir.resolve()
     session_id = str(uuid4())
 
+    resume_context = _resolve_resume_context(
+        continue_session=continue_session,
+        resume_session=resume_session,
+        settings=settings,
+    )
+
     registry, risk_levels = _build_tool_registry()
 
     from godspeed.tui.textual_app import GodspeedTextualApp
@@ -242,6 +253,7 @@ async def _run_app(
         permission_mode=permission_mode,
         execution_mode=execution_mode or "tool",
         audit_dir=audit_dir,
+        resume_context=resume_context,
     )
     await app.run_async()
 
@@ -278,6 +290,20 @@ async def _run_app(
     default=None,
     help="Execution mode: 'tool' (default, use tool calls), 'codeact' (write code blocks).",
 )
+@click.option(
+    "--continue",
+    "continue_session",
+    is_flag=True,
+    default=False,
+    help="Resume the most recent conversation.",
+)
+@click.option(
+    "--resume",
+    "resume_session",
+    type=str,
+    default=None,
+    help="Resume a specific session by ID.",
+)
 @click.pass_context
 def main(
     ctx: click.Context,
@@ -287,6 +313,8 @@ def main(
     audit_dir: Path | None,
     permission_mode: str | None,
     execution_mode: str | None,
+    continue_session: bool,
+    resume_session: str | None,
 ) -> None:
     """Godspeed -- Trusted production coding agent."""
     _setup_logging(verbose)
@@ -316,6 +344,8 @@ def main(
                     audit_dir,
                     permission_mode,
                     execution_mode or "tool",
+                    continue_session=continue_session,
+                    resume_session=resume_session,
                 )
             )
 
@@ -329,6 +359,49 @@ def version() -> None:
 
     c = RichConsole()
     c.print(brand(__version__))
+
+
+@main.command("list-sessions")
+@click.option(
+    "--limit",
+    type=int,
+    default=10,
+    help="Max sessions to show (default: 10).",
+)
+def list_sessions(limit: int) -> None:
+    """List recent sessions (id, started, summary snippet)."""
+    from datetime import UTC, datetime
+
+    from rich.console import Console as RichConsole
+    from rich.table import Table
+
+    from godspeed.config import GodspeedSettings
+    from godspeed.memory.session import SessionMemory
+    from godspeed.tui.theme import BOLD_PRIMARY, DIM, NEUTRAL, TABLE_BORDER
+
+    c = RichConsole()
+    settings = GodspeedSettings()
+    memory = SessionMemory(db_path=settings.global_dir / "memory.db")
+    try:
+        sessions = memory.list_sessions(limit=limit)
+    finally:
+        memory.close()
+
+    if not sessions:
+        c.print(f"[{DIM}]No sessions recorded yet.[/{DIM}]")
+        return
+
+    table = Table(title="Recent Sessions", border_style=TABLE_BORDER, expand=False)
+    table.add_column("Session", style=BOLD_PRIMARY)
+    table.add_column("Started", style=NEUTRAL)
+    table.add_column("Summary")
+
+    for s in sessions:
+        started = datetime.fromtimestamp(s["started_at"], tz=UTC).strftime("%Y-%m-%d %H:%M")
+        summary = (s.get("summary") or "").replace("\n", " ")[:80]
+        table.add_row(s["id"][:12], started, summary)
+
+    c.print(table)
 
 
 @main.group()
@@ -516,6 +589,222 @@ def headless_run(
         sys.exit(ExitCode.INTERRUPTED)
 
 
+@main.command("batch")
+@click.argument("goal", required=False, default="")
+@click.option(
+    "--units",
+    type=int,
+    default=None,
+    help="Number of units to decompose into (1-30). Defaults to batch config or 5.",
+)
+@click.option(
+    "--parallelism",
+    type=int,
+    default=None,
+    help="Max concurrent worktrees (default: batch config or 5).",
+)
+@click.option(
+    "--allow-dirty",
+    is_flag=True,
+    default=False,
+    help="Allow running with uncommitted changes in the working tree.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Decompose and print the plan without spawning worktrees or touching git.",
+)
+@click.option(
+    "--open-pr",
+    is_flag=True,
+    default=False,
+    help=(
+        "Open a GitHub PR per unit with a captured patch (requires the gh CLI "
+        "and a pushed per-unit branch). Overrides batch.open_pr config."
+    ),
+)
+@click.option(
+    "--project-dir",
+    "-d",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path("."),
+    help="Project directory.",
+)
+def batch_cmd(
+    goal: str,
+    units: int | None,
+    parallelism: int | None,
+    allow_dirty: bool,
+    dry_run: bool,
+    open_pr: bool,
+    project_dir: Path,
+) -> None:
+    """Run a task as a batch of parallel worktree units (headless /batch).
+
+    Decomposes GOAL into independent units and runs each in its own isolated
+    git worktree, up to --parallelism at once. Results are printed to stdout.
+
+    Decomposition uses the deterministic path (an explicit numbered list in
+    the goal, else a single unit) — no LLM call is made, so the CLI never
+    makes a network request during planning.
+
+    Exit codes:
+        0   success — all units completed
+        1   batch error — a unit failed or the run aborted
+        5   invalid input — no goal, or --units outside 1-30
+
+    Examples:
+        godspeed batch "1. Write parser\n2. Write tests\n3. Update docs"
+        godspeed batch "Fix the build" --units 3 --parallelism 2
+        godspeed batch "Plan this" --dry-run
+        godspeed batch "Fix the build" --open-pr
+    """
+    from rich.console import Console as RichConsole
+
+    from godspeed.agent.batch import (
+        MAX_BATCH_UNITS,
+        MIN_BATCH_UNITS,
+        BatchGitError,
+        WorktreeBatchRunner,
+        decompose_task,
+    )
+    from godspeed.agent.result import ExitCode
+    from godspeed.config import GodspeedSettings
+    from godspeed.tui.theme import BOLD_PRIMARY, DIM, ERROR, SUCCESS, WARNING
+
+    c = RichConsole()
+
+    if not goal.strip():
+        sys.stderr.write("Error: No goal provided. Pass a positional argument.\n")
+        sys.exit(int(ExitCode.INVALID_INPUT))
+
+    settings = GodspeedSettings(project_dir=project_dir)
+
+    effective_units = units if units is not None else settings.batch.parallelism
+    if effective_units < MIN_BATCH_UNITS or effective_units > MAX_BATCH_UNITS:
+        sys.stderr.write(
+            f"Error: --units must be between {MIN_BATCH_UNITS} and {MAX_BATCH_UNITS}, "
+            f"got {effective_units}.\n"
+        )
+        sys.exit(int(ExitCode.INVALID_INPUT))
+
+    effective_parallelism = parallelism if parallelism is not None else settings.batch.parallelism
+    effective_open_pr = open_pr or settings.batch.open_pr
+
+    try:
+        plan = asyncio.run(decompose_task(goal, num_units_hint=effective_units))
+    except ValueError as exc:
+        sys.stderr.write(f"Error: Batch decomposition failed: {exc}\n")
+        sys.exit(int(ExitCode.INVALID_INPUT))
+
+    # Print the plan. This happens before any git operations so --dry-run
+    # never touches the working tree or constructs a coordinator.
+    c.print(f"[{BOLD_PRIMARY}]Batch plan:[/{BOLD_PRIMARY}] {len(plan.units)} unit(s)")
+    for unit in plan.units:
+        c.print(f"  [{DIM}]{unit.id}[/{DIM}] {unit.title}")
+
+    if dry_run:
+        c.print(f"[{DIM}]Dry run — no worktrees spawned, no git touched.[/{DIM}]")
+        if effective_open_pr:
+            c.print(
+                f"[{DIM}]PR step skipped (dry run) — no worktrees spawned, no PRs opened.[/{DIM}]"
+            )
+        return
+
+    # Build the coordinator + runner (only in the non-dry-run path).
+    from godspeed.agent.coordinator import AgentCoordinator
+    from godspeed.audit.trail import AuditTrail
+    from godspeed.llm.client import LLMClient, ModelRouter
+    from godspeed.security.permissions import PermissionEngine
+    from godspeed.tools.base import ToolContext
+
+    registry, risk_levels = _build_tool_registry()
+    effective_model = settings.model
+    session_id = str(uuid4())
+
+    audit_dir = settings.global_dir / "audit"
+    audit_trail = AuditTrail(log_dir=audit_dir, session_id=session_id)
+    audit_trail.record(
+        event_type="session_start",
+        detail={"mode": "batch", "goal": goal[:500], "model": effective_model},
+    )
+
+    permission_engine = PermissionEngine(
+        deny_patterns=settings.permissions.deny,
+        allow_patterns=settings.permissions.allow,
+        ask_patterns=settings.permissions.ask,
+        tool_risk_levels=risk_levels,
+    )
+
+    router = ModelRouter(routing=settings.routing) if settings.routing else None
+    llm_client = LLMClient(
+        model=effective_model,
+        fallback_models=settings.fallback_models,
+        router=router,
+        thinking_budget=settings.thinking_budget,
+        max_cost_usd=settings.max_cost_usd,
+        reasoning_effort=settings.reasoning_effort,
+    )
+
+    tool_context = ToolContext(
+        cwd=project_dir.resolve(),
+        session_id=session_id,
+        permissions=permission_engine,
+        audit=audit_trail,
+        llm_client=llm_client,  # type: ignore[arg-type]
+    )
+
+    coordinator = AgentCoordinator(
+        llm_client=llm_client,
+        tool_registry=registry,
+        tool_context=tool_context,
+    )
+
+    worktree_root = None
+    if settings.batch.worktree_dir:
+        worktree_root = Path(settings.batch.worktree_dir)
+
+    runner = WorktreeBatchRunner(
+        working_dir=project_dir.resolve(),
+        coordinator=coordinator,
+        parallelism=effective_parallelism,
+        allow_dirty=allow_dirty,
+        worktree_root=worktree_root,
+        open_pr=effective_open_pr,
+    )
+
+    try:
+        results = asyncio.run(runner.run(plan))
+    except BatchGitError as exc:
+        c.print(f"[{ERROR}]{exc}[/{ERROR}]")
+        sys.exit(int(ExitCode.TOOL_ERROR))
+    except KeyboardInterrupt:
+        sys.exit(int(ExitCode.INTERRUPTED))
+
+    for result in results:
+        if result.ok:
+            c.print(f"[{SUCCESS}][batch] {result.id}: done — {result.summary[:120]}[/{SUCCESS}]")
+            if result.pr_url:
+                c.print(f"[{SUCCESS}][batch] {result.id}: PR — {result.pr_url}[/{SUCCESS}]")
+        else:
+            c.print(f"[{ERROR}][batch] {result.id}: FAILED — {result.summary[:120]}[/{ERROR}]")
+            if result.worktree_path is not None:
+                c.print(
+                    f"[{WARNING}][batch] {result.id}: worktree left at "
+                    f"{result.worktree_path}[/{WARNING}]"
+                )
+
+    ok_count = sum(1 for r in results if r.ok)
+    c.print(
+        f"[{BOLD_PRIMARY}]Batch finished:[/{BOLD_PRIMARY}] "
+        f"{ok_count}/{len(results)} units succeeded."
+    )
+
+    if ok_count < len(results):
+        sys.exit(int(ExitCode.TOOL_ERROR))
+
+
 @main.command("serve")
 @click.option(
     "--config",
@@ -592,6 +881,53 @@ def _resolve_task_input(task_arg: str, prompt_file: Path | None) -> str:
     if not sys.stdin.isatty():
         return sys.stdin.read().strip()
     return ""
+
+
+def _resolve_resume_context(
+    continue_session: bool,
+    resume_session: str | None,
+    settings: Any,
+) -> dict[str, Any] | None:
+    """Resolve the session to resume into a bootstrap context dict.
+
+    Returns None when no resume was requested. When ``--resume <id>`` names an
+    unknown session, exits with code 5 (INVALID_INPUT). The returned dict has
+    the shape::
+
+        {
+            "session_id": str,
+            "messages": list[dict] | None,   # full history if stored
+            "summary": str,                  # stored summary (may be empty)
+        }
+    """
+    if not continue_session and not resume_session:
+        return None
+
+    from godspeed.agent.result import ExitCode
+    from godspeed.memory.session import SessionMemory
+
+    memory = SessionMemory(db_path=settings.global_dir / "memory.db")
+    try:
+        if resume_session:
+            session = memory.get_session(resume_session)
+            if session is None:
+                sys.stderr.write(f"Error: Unknown session: {resume_session}\n")
+                sys.exit(int(ExitCode.INVALID_INPUT))
+        else:
+            session = memory.get_most_recent_session()
+            if session is None:
+                sys.stderr.write("Error: No previous session to continue.\n")
+                sys.exit(int(ExitCode.INVALID_INPUT))
+
+        session_id = session["id"]
+        messages = memory.get_messages(session_id)
+        return {
+            "session_id": session_id,
+            "messages": messages,
+            "summary": session.get("summary", "") or "",
+        }
+    finally:
+        memory.close()
 
 
 async def _headless_run(
@@ -993,6 +1329,179 @@ def ollama_delete(model: str) -> None:
         c.print(f"  [{SUCCESS}]{message}[/{SUCCESS}]")
     else:
         c.print(f"  [{ERROR}]Failed: {message}[/{ERROR}]")
+
+
+@main.group()
+def mcp() -> None:
+    """Manage MCP servers — add, list, remove."""
+
+
+def _mcp_project_dir(ctx: click.Context) -> Path:
+    """Resolve the project directory from the main group's context object."""
+    if ctx.obj and ctx.obj.get("project_dir"):
+        return Path(ctx.obj["project_dir"])
+    return Path(".")
+
+
+def _mcp_describe_server(entry: dict[str, Any]) -> str:
+    """Render a server entry's transport/command for the list table."""
+    transport = entry.get("transport", "stdio")
+    if transport == "sse":
+        url = entry.get("url", "")
+        return f"sse ({url})"
+    command = entry.get("command", "")
+    args = entry.get("args", []) or []
+    parts = [command, *args]
+    return " ".join(parts) if parts else "stdio"
+
+
+@mcp.command("add", context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
+@click.argument("name")
+@click.argument("command")
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+@click.option(
+    "--env",
+    "env_vars",
+    multiple=True,
+    metavar="KEY=VALUE",
+    help="Extra env var for the server subprocess (repeatable).",
+)
+@click.option(
+    "--scope",
+    type=click.Choice(["user", "project"]),
+    default="project",
+    help="Where to store the server (default: project).",
+)
+@click.option("--force", is_flag=True, help="Replace an existing server with the same name.")
+@click.pass_context
+def mcp_add(
+    ctx: click.Context,
+    name: str,
+    command: str,
+    args: tuple[str, ...],
+    env_vars: tuple[str, ...],
+    scope: str,
+    force: bool,
+) -> None:
+    """Add an MCP server.
+
+    A bare ``COMMAND [ARGS...]`` is stored as a stdio server. When COMMAND
+    starts with ``http://`` or ``https://`` it is stored as an SSE/HTTP server
+    (the URL is used as the server's base URL).
+    """
+    from rich.console import Console as RichConsole
+
+    from godspeed.config import append_mcp_server
+    from godspeed.tui.theme import ERROR, SUCCESS
+
+    c = RichConsole()
+
+    env_dict: dict[str, str] = {}
+    for kv in env_vars:
+        if "=" not in kv:
+            c.print(f"[{ERROR}]Invalid --env value {kv!r} (expected KEY=VALUE)[/{ERROR}]")
+            sys.exit(1)
+        key, _, value = kv.partition("=")
+        env_dict[key] = value
+
+    if command.startswith(("http://", "https://")):
+        entry: dict[str, Any] = {"name": name, "transport": "sse", "url": command}
+        transport = "sse"
+    else:
+        entry = {"name": name, "transport": "stdio", "command": command}
+        if args:
+            entry["args"] = list(args)
+        if env_dict:
+            entry["env"] = env_dict
+        transport = "stdio"
+
+    project_dir = _mcp_project_dir(ctx)
+    write_dir = None if scope == "user" else project_dir
+
+    try:
+        path = append_mcp_server(entry, project_dir=write_dir, force=force)
+    except ValueError as exc:
+        c.print(f"[{ERROR}]{exc}[/{ERROR}]")
+        sys.exit(1)
+
+    if path is None:
+        c.print(f"[{ERROR}]Failed to write MCP server '{name}'.[/{ERROR}]")
+        sys.exit(1)
+
+    c.print(f"[{SUCCESS}]Added MCP server '{name}' ({transport}) to {path}[/{SUCCESS}]")
+
+
+@mcp.command("list")
+@click.pass_context
+def mcp_list(ctx: click.Context) -> None:
+    """List configured MCP servers (name, transport/command, scope)."""
+    from rich.console import Console as RichConsole
+    from rich.table import Table
+
+    from godspeed.config import DEFAULT_GLOBAL_DIR, _load_yaml_cached
+    from godspeed.tui.theme import BOLD_PRIMARY, DIM, NEUTRAL, TABLE_BORDER
+
+    c = RichConsole()
+    project_dir = _mcp_project_dir(ctx)
+
+    rows: list[tuple[str, str, str]] = []
+
+    global_path = DEFAULT_GLOBAL_DIR / "settings.yaml"
+    if global_path.exists():
+        data = _load_yaml_cached(global_path) or {}
+        for s in data.get("mcp_servers", []) or []:
+            if isinstance(s, dict) and s.get("name"):
+                rows.append((s["name"], _mcp_describe_server(s), "user"))
+
+    project_path = project_dir / ".godspeed" / "settings.yaml"
+    if project_path.exists():
+        data = _load_yaml_cached(project_path) or {}
+        for s in data.get("mcp_servers", []) or []:
+            if isinstance(s, dict) and s.get("name"):
+                rows.append((s["name"], _mcp_describe_server(s), "project"))
+
+    if not rows:
+        c.print(f"[{DIM}]No MCP servers configured.[/{DIM}]")
+        return
+
+    table = Table(title="MCP Servers", border_style=TABLE_BORDER, expand=False)
+    table.add_column("Name", style=BOLD_PRIMARY)
+    table.add_column("Transport / Command", style=NEUTRAL)
+    table.add_column("Scope")
+    for name, desc, scope in rows:
+        table.add_row(name, desc, scope)
+    c.print(table)
+
+
+@mcp.command("remove")
+@click.argument("name")
+@click.option(
+    "--scope",
+    type=click.Choice(["user", "project"]),
+    default="project",
+    help="Scope to remove from (default: project).",
+)
+@click.pass_context
+def mcp_remove(ctx: click.Context, name: str, scope: str) -> None:
+    """Remove an MCP server by name."""
+    from rich.console import Console as RichConsole
+
+    from godspeed.config import remove_mcp_server
+    from godspeed.tui.theme import ERROR, SUCCESS
+
+    c = RichConsole()
+    project_dir = _mcp_project_dir(ctx)
+    write_dir = None if scope == "user" else project_dir
+
+    found, path = remove_mcp_server(name, project_dir=write_dir)
+    if not found:
+        c.print(f"[{ERROR}]MCP server '{name}' not found in {scope} scope.[/{ERROR}]")
+        sys.exit(1)
+    if path is None:
+        c.print(f"[{ERROR}]Failed to remove MCP server '{name}'.[/{ERROR}]")
+        sys.exit(1)
+
+    c.print(f"[{SUCCESS}]Removed MCP server '{name}' from {path}[/{SUCCESS}]")
 
 
 @main.command("scan")
