@@ -7,10 +7,12 @@ dependencies — everything is stdlib.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import enum
 import json
 import logging
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +21,154 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _MAX_HISTOGRAM_BUCKETS = 100
+
+_span_stack: contextvars.ContextVar[tuple[tuple[str, str], ...]] = contextvars.ContextVar(
+    "godspeed_span_stack",
+    default=(),
+)
+
+
+class SpanStatus(enum.StrEnum):
+    """OTel-compatible span status codes."""
+
+    UNSET = "unset"
+    OK = "ok"
+    ERROR = "error"
+
+
+@dataclass(frozen=True, slots=True)
+class Span:
+    """A single OTel-style span record.
+
+    Stdlib-only: no opentelemetry dependency. Emitted to the MetricsSink
+    as a JSONL line with a ``trace_id`` so spans from one logical run can
+    be correlated across events.
+    """
+
+    name: str
+    trace_id: str
+    span_id: str
+    parent_span_id: str | None
+    start_time: float
+    end_time: float
+    status: SpanStatus
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def duration_ms(self) -> float:
+        """Span duration in milliseconds."""
+        return (self.end_time - self.start_time) * 1000
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a plain dict for JSON emission."""
+        return {
+            "name": self.name,
+            "trace_id": self.trace_id,
+            "span_id": self.span_id,
+            "parent_span_id": self.parent_span_id,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "duration_ms": round(self.duration_ms, 2),
+            "status": self.status.value,
+            "attributes": self.attributes,
+        }
+
+
+class Tracer:
+    """Minimal stdlib-only tracer that emits OTel-style spans.
+
+    Provides a context-manager ``start_span`` that records start/end times
+    and writes the completed span to a :class:`MetricsSink`. A ``trace_id``
+    is generated per root span and propagated to children so a logical run
+    is traceable across all emitted events.
+    """
+
+    def __init__(self, sink: MetricsSink) -> None:
+        self._sink = sink
+
+    def start_span(
+        self,
+        name: str,
+        attributes: dict[str, Any] | None = None,
+    ) -> _SpanContext:
+        """Start a new span, returning a context manager."""
+        stack = _span_stack.get()
+        if stack:
+            trace_id, parent_span_id = stack[-1]
+        else:
+            trace_id = uuid.uuid4().hex
+            parent_span_id = None
+        span_id = uuid.uuid4().hex
+        return _SpanContext(
+            tracer=self,
+            name=name,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            attributes=attributes or {},
+        )
+
+    def _enter(self, trace_id: str, span_id: str) -> None:
+        _span_stack.set((*_span_stack.get(), (trace_id, span_id)))
+
+    def _exit(self, trace_id: str, span_id: str) -> None:
+        stack = _span_stack.get()
+        if stack and stack[-1] == (trace_id, span_id):
+            _span_stack.set(stack[:-1])
+
+    def _emit(self, span: Span) -> None:
+        self._sink.emit("span", span.to_dict())
+
+
+class _SpanContext:
+    """Context manager returned by :meth:`Tracer.start_span`."""
+
+    def __init__(
+        self,
+        tracer: Tracer,
+        name: str,
+        trace_id: str,
+        span_id: str,
+        parent_span_id: str | None,
+        attributes: dict[str, Any],
+    ) -> None:
+        self._tracer = tracer
+        self._name = name
+        self._trace_id = trace_id
+        self._span_id = span_id
+        self._parent_span_id = parent_span_id
+        self._attributes = attributes
+        self._start_time: float | None = None
+        self._status = SpanStatus.UNSET
+
+    def set_status(self, status: SpanStatus) -> None:
+        """Set the span status before exiting."""
+        self._status = status
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        """Add an attribute to the span."""
+        self._attributes[key] = value
+
+    def __enter__(self) -> _SpanContext:
+        self._start_time = time.time()
+        self._tracer._enter(self._trace_id, self._span_id)
+        return self
+
+    def __exit__(self, exc_type: Any, _exc: Any, _tb: Any) -> None:
+        if exc_type is not None:
+            self._status = SpanStatus.ERROR
+        self._tracer._exit(self._trace_id, self._span_id)
+        span = Span(
+            name=self._name,
+            trace_id=self._trace_id,
+            span_id=self._span_id,
+            parent_span_id=self._parent_span_id,
+            start_time=self._start_time or time.time(),
+            end_time=time.time(),
+            status=self._status,
+            attributes=self._attributes,
+        )
+        self._tracer._emit(span)
 
 
 class AlertSeverity(enum.StrEnum):
@@ -396,8 +546,17 @@ class MetricsSink:
         self._path = path
         self._file: Any | None = None
 
-    def emit(self, event_type: str, payload: dict[str, Any]) -> None:
-        line = json.dumps({"ts": time.time(), "event": event_type, **payload}, default=str)
+    def emit(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        trace_id: str | None = None,
+    ) -> None:
+        record: dict[str, Any] = {"ts": time.time(), "event": event_type}
+        if trace_id is not None:
+            record["trace_id"] = trace_id
+        record.update(payload)
+        line = json.dumps(record, default=str)
         if self._path is not None:
             try:
                 if self._file is None:
