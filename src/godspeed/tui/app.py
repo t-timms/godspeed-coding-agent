@@ -11,11 +11,15 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from rich.status import Status
 
-from godspeed.agent.conversation import Conversation
+from godspeed.agent.conversation import (
+    Conversation,
+    build_multimodal_message,
+)
 from godspeed.agent.loop import agent_loop
 from godspeed.agent.result import AgentCancelledError
 from godspeed.audit.trail import AuditTrail
@@ -25,9 +29,24 @@ from godspeed.security.permissions import ALLOW, ASK, PermissionDecision, Permis
 from godspeed.tools.base import RiskLevel, ToolContext
 from godspeed.tools.registry import ToolRegistry
 from godspeed.tui import output as _output
+from godspeed.tui.attachments import (
+    Attachment,
+    AttachmentError,
+    PendingAttachments,
+    interpret_clipboard,
+    model_supports_vision,
+    parse_attachment_directives,
+)
+from godspeed.tui.bash_passthrough import (
+    check_dangerous,
+    parse_bash_command,
+    run_background,
+    run_foreground,
+)
 from godspeed.tui.commands import Commands
 from godspeed.tui.completions import GodspeedCompleter
 from godspeed.tui.mentions import parse_mentions, resolve_mentions
+from godspeed.tui.message_queue import MessageQueue
 from godspeed.tui.output import (
     format_assistant_text,
     format_diff_review_prompt,
@@ -46,6 +65,17 @@ from godspeed.tui.output import (
     is_compact_mode,
     set_compact_mode,
 )
+from godspeed.tui.rewind import (
+    RESTORE_BOTH,
+    RESTORE_CONVERSATION,
+    RESTORE_FILES,
+    RESTORE_NONE,
+    REWIND_WINDOW_SECONDS,
+    collect_rewind_entries,
+    parse_rewind_choice,
+    restore_conversation,
+    restore_files,
+)
 from godspeed.tui.theme import (
     BOLD_PRIMARY,
     BOLD_WARNING,
@@ -53,6 +83,8 @@ from godspeed.tui.theme import (
     ERROR,
     NEUTRAL,
     PROMPT_ICON,
+    SUCCESS,
+    WARNING,
     icon_prompt,
     styled,
 )
@@ -78,12 +110,20 @@ def _schedule_dream(dream: Any) -> None:
     asyncio.ensure_future(_run_dream())  # noqa: RUF006
 
 
-def _build_key_bindings() -> KeyBindings:
+def _build_key_bindings(
+    on_queue: Any | None = None,
+    on_rewind: Any | None = None,
+    on_paste: Any | None = None,
+) -> KeyBindings:
     """Build prompt-toolkit key bindings.
 
     - Enter: submit input
     - Escape+Enter: insert newline for multiline input
     - Ctrl+C: abort current input
+    - Ctrl+Q: queue current input (does not submit)
+    - Ctrl+V: paste — attaches an image path from the clipboard if the
+      clipboard holds one, otherwise falls back to normal text paste
+    - Escape pressed twice quickly: open the rewind picker
     """
     bindings = KeyBindings()
 
@@ -96,6 +136,30 @@ def _build_key_bindings() -> KeyBindings:
     def _newline(event: Any) -> None:
         """Escape+Enter inserts a newline for multiline input."""
         event.current_buffer.insert_text("\n")
+
+    if on_paste is not None:
+
+        @bindings.add(Keys.ControlV)
+        def _paste(event: Any) -> None:
+            """Ctrl+V pastes clipboard content, attaching images when possible."""
+            on_paste(event)
+
+    if on_queue is not None:
+
+        @bindings.add(Keys.ControlQ)
+        def _queue(event: Any) -> None:
+            """Ctrl+Q queues the current input instead of submitting."""
+            text = event.current_buffer.text
+            if text.strip():
+                on_queue(text)
+                event.current_buffer.reset()
+
+    if on_rewind is not None:
+
+        @bindings.add(Keys.Escape)
+        def _escape(_event: Any) -> None:
+            """Escape pressed twice quickly opens the rewind picker."""
+            on_rewind()
 
     return bindings
 
@@ -145,9 +209,20 @@ class TUIApp:
         self._pause_event.set()  # Start in running state
 
         # Mid-turn cancel: set by Ctrl+C while the agent is running. Cleared
-        # each time a new turn starts. Distinct from _pause_event ΓÇö pause
+        # each time a new turn starts. Distinct from _pause_event — pause
         # stalls at iteration boundary, cancel unwinds immediately.
         self._cancel_event = asyncio.Event()
+
+        # Messages submitted while the agent is running are queued here and
+        # drained at the safe point between turns.
+        self._message_queue = MessageQueue()
+
+        # Image attachments pending for the next user message. One-shot:
+        # consumed by the next send and cleared.
+        self._pending_attachments = PendingAttachments()
+
+        # Track last Escape press time for the ESC+ESC rewind picker.
+        self._last_escape_monotonic = 0.0
 
         # Per-session turn counter, displayed in the status HUD.
         self._turn_count = 0
@@ -168,6 +243,11 @@ class TUIApp:
             self._commands._task_store = task_store
         if codebase_index is not None:
             self._commands._codebase_index = codebase_index
+
+        # Wire the message queue so /loop can enqueue recurring turns
+        self._commands._message_queue = self._message_queue
+        if session_memory is not None:
+            self._commands._session_memory = session_memory
 
         # Register skill commands with full skill system features
         if skills:
@@ -190,7 +270,11 @@ class TUIApp:
             cwd=tool_context.cwd,
             extra_commands=extra_completions,
         )
-        self._key_bindings = _build_key_bindings()
+        self._key_bindings = _build_key_bindings(
+            on_queue=self._queue_message,
+            on_rewind=self._on_escape_press,
+            on_paste=self._on_paste,
+        )
         self._hook_executor = hook_executor
 
         # Patch the permission check to handle ASK interactively
@@ -226,6 +310,439 @@ class TUIApp:
         self._last_sigint_monotonic = now
         self._cancel_event.set()
 
+    def _queue_message(self, text: str) -> None:
+        """Queue a message for the next turn (Ctrl+Q at the prompt)."""
+        self._message_queue.enqueue(text)
+        _output.console.print(
+            f"  [{DIM}]Queued: {text.strip()[:60]}"
+            f"{'...' if len(text.strip()) > 60 else ''}"
+            f" ({len(self._message_queue)} pending)[/{DIM}]"
+        )
+
+    def _on_paste(self, event: Any) -> None:
+        """Handle Ctrl+V paste — attach an image path from the clipboard.
+
+        prompt_toolkit's clipboard abstraction exposes only text, so image
+        paste is detected by checking whether the clipboard holds a path to an
+        existing supported image file. If it does, the image is attached as a
+        pending attachment. Otherwise the clipboard content is inserted as
+        plain text (normal paste behavior).
+        """
+        try:
+            data = event.clipboard.get_data()
+        except Exception as exc:
+            logger.warning("Clipboard read failed: %s", exc)
+            _output.console.print(
+                f"  [{WARNING}]image paste unsupported in this terminal[/{WARNING}]"
+            )
+            return
+
+        attachment, notice = interpret_clipboard(data.text, self._tool_context.cwd)
+        if attachment is not None:
+            self._pending_attachments.add(attachment)
+            self._print_attached(attachment, source="clipboard")
+            return
+        if notice is not None:
+            _output.console.print(f"  [{WARNING}]{notice}[/{WARNING}]")
+            return
+
+        # Not an image — fall back to normal text paste.
+        event.current_buffer.insert_text(data.text)
+
+    def _print_attached(self, attachment: Attachment, source: str) -> None:
+        """Print the 'attached: <name> (<dims>, <size>)' notice."""
+        _output.console.print(
+            f"  [{SUCCESS}]attached: {attachment.path.name}"
+            f" ({attachment.dimensions}, {attachment.size_kb:.0f} KB)"
+            f" [{DIM}]{source}[/{DIM}][/{SUCCESS}]"
+        )
+
+    def _on_escape_press(self) -> None:
+        """Handle Escape key press — opens rewind picker on double-press."""
+        now = time.monotonic()
+        if (
+            self._last_escape_monotonic
+            and (now - self._last_escape_monotonic) < REWIND_WINDOW_SECONDS
+        ):
+            self._last_escape_monotonic = 0.0
+            self._open_rewind_picker()
+        else:
+            self._last_escape_monotonic = now
+
+    def _open_rewind_picker(self) -> None:
+        """Open the ESC+ESC rewind picker.
+
+        Shows a numbered list of recent per-prompt checkpoints (file
+        snapshots + conversation checkpoints) and lets the user choose
+        what to restore: [c]onversation / [f]iles / [b]oth / [n]one.
+        """
+        entries = collect_rewind_entries(self._tool_context.cwd, self._session_id)
+        if not entries:
+            _output.console.print(f"  [{DIM}]No checkpoints available to rewind.[/{DIM}]")
+            return
+
+        _output.console.print(f"\n  [{BOLD_PRIMARY}]Rewind[/{BOLD_PRIMARY}] — recent checkpoints:")
+        for idx, entry in enumerate(entries, start=1):
+            kind_style = SUCCESS if entry.kind == "conversation" else NEUTRAL
+            _output.console.print(
+                f"    [{NEUTRAL}]{idx}.[/{NEUTRAL}] "
+                f"[{kind_style}]{entry.kind}[/{kind_style}] "
+                f"{entry.name}  [{DIM}]{entry.detail}[/{DIM}]"
+            )
+        _output.console.print(f"  [{DIM}]Choose an entry number, or 0 to cancel.[/{DIM}]")
+
+        try:
+            answer = _output.console.input(f"[{BOLD_WARNING}]  > [/{BOLD_WARNING}]").strip()
+        except (KeyboardInterrupt, EOFError):
+            _output.console.print(f"  [{DIM}]Rewind cancelled.[/{DIM}]")
+            return
+
+        if not answer.isdigit():
+            _output.console.print(f"  [{DIM}]Rewind cancelled.[/{DIM}]")
+            return
+
+        idx = int(answer)
+        if idx < 1 or idx > len(entries):
+            _output.console.print(f"  [{DIM}]Rewind cancelled.[/{DIM}]")
+            return
+
+        entry = entries[idx - 1]
+
+        _output.console.print(
+            f"  [{DIM}]Restore what? [c]onversation / [f]iles / [b]oth / [n]one[/{DIM}]"
+        )
+        try:
+            choice = _output.console.input(f"[{BOLD_WARNING}]  > [/{BOLD_WARNING}]").strip()
+        except (KeyboardInterrupt, EOFError):
+            choice = "n"
+
+        action = parse_rewind_choice(choice)
+        if action == RESTORE_NONE:
+            _output.console.print(f"  [{DIM}]Rewind cancelled.[/{DIM}]")
+            return
+
+        if action in (RESTORE_CONVERSATION, RESTORE_BOTH):
+            if entry.kind == "conversation":
+                summary = restore_conversation(
+                    self._conversation, entry.name, self._tool_context.cwd
+                )
+                _output.console.print(f"  [{SUCCESS}]{summary}[/{SUCCESS}]")
+            else:
+                _output.console.print(
+                    f"  [{WARNING}]Entry {entry.name} is a file checkpoint — "
+                    f"no conversation to restore.[/{WARNING}]"
+                )
+
+        if action in (RESTORE_FILES, RESTORE_BOTH):
+            summary = restore_files(self._tool_context.cwd, self._session_id)
+            _output.console.print(f"  [{SUCCESS}]{summary}[/{SUCCESS}]")
+
+    async def _run_bash_command(self, command: str, background: bool) -> None:
+        """Run a bash pass-through command (bypasses the LLM).
+
+        Security: dangerous commands are blocked via the existing
+        dangerous-command detection. The audit trail hook is wired when
+        an AuditTrail is available.
+        """
+        dangers = check_dangerous(command)
+        if dangers:
+            _output.console.print(
+                f"  [{ERROR}]Blocked: dangerous command detected — {', '.join(dangers)}[/{ERROR}]"
+            )
+            logger.warning("Bash pass-through blocked command=%r dangers=%s", command, dangers)
+            return
+
+        if self._audit_trail is not None:
+            try:
+                self._audit_trail.record(
+                    event_type="tool_call",
+                    detail={
+                        "tool_name": "shell",
+                        "command": command,
+                        "source": "bash_passthrough",
+                        "background": background,
+                    },
+                )
+            except Exception as exc:
+                logger.warning("Audit record failed for bash pass-through: %s", exc)
+
+        if background:
+            pid = await run_background(command, self._tool_context.cwd)
+            _output.console.print(f"  [{DIM}]Background: {command} (pid {pid})[/{DIM}]")
+            return
+
+        _output.console.print(f"  [{NEUTRAL}]$ {command}[/{NEUTRAL}]")
+
+        async def _on_output(text: str) -> None:
+            _output.console.print(text, end="")
+
+        try:
+            returncode, _text = await run_foreground(
+                command,
+                self._tool_context.cwd,
+                on_output=_on_output,
+            )
+        except Exception as exc:
+            _output.console.print(f"  [{ERROR}]Command failed: {exc}[/{ERROR}]")
+            logger.error("Bash pass-through error command=%r error=%s", command, exc)
+            return
+
+        if returncode != 0:
+            _output.console.print(f"  [{ERROR}]Exit code {returncode}[/{ERROR}]")
+        else:
+            _output.console.print()
+
+    async def _process_user_input(
+        self,
+        user_input: str,
+        *,
+        running_loop: asyncio.AbstractEventLoop,
+        sigint_installed: bool,
+    ) -> bool:
+        """Process one user input as an agent turn. Returns True to quit."""
+        # Check for slash commands
+        cmd_result = self._commands.dispatch(user_input)
+        if cmd_result is not None:
+            return cmd_result.should_quit
+
+        # Check for bash pass-through (!command / !!command)
+        bash_cmd = parse_bash_command(user_input)
+        if bash_cmd is not None:
+            await self._run_bash_command(bash_cmd.command, bash_cmd.background)
+            return False
+
+        # Memory: detect and store user corrections
+        if self._correction_tracker is not None:
+            self._correction_tracker.check_for_correction(user_input)
+
+        # Echo user message with turn marker
+        self._turn_count += 1
+        _output.console.print()
+        _output.console.print(
+            f"  {styled(str(self._turn_count), NEUTRAL)}"
+            f" {styled(PROMPT_ICON, BOLD_PRIMARY)}"
+            f" {user_input.strip()}"
+        )
+
+        # Parse @-mentions from input and resolve to content blocks
+        effective_input = user_input
+
+        # Parse :img <path> / @image=<path> directives and attach the images
+        # to the next message. Directives are stripped from the sent text.
+        cleaned_input, image_paths = parse_attachment_directives(user_input)
+        if image_paths:
+            for image_path in image_paths:
+                try:
+                    attachment = self._pending_attachments.attach(
+                        image_path, self._tool_context.cwd
+                    )
+                    self._print_attached(attachment, source=":img")
+                except AttachmentError as exc:
+                    _output.console.print(f"  [{ERROR}]{exc}[/{ERROR}]")
+            user_input = cleaned_input
+
+        # Drain any pending image attachments (from paste or directives).
+        pending = self._pending_attachments.drain()
+        if pending and not model_supports_vision(self._llm_client.model):
+            _output.console.print(
+                f"  [{WARNING}]Model {self._llm_client.model} may not support"
+                f" vision — sending {len(pending)} image attachment(s) as text"
+                f" only.[/{WARNING}]"
+            )
+            logger.warning(
+                "Vision-unsupported model=%s dropping %d image attachment(s)",
+                self._llm_client.model,
+                len(pending),
+            )
+            pending = []
+        cleaned_text, mentions = parse_mentions(user_input)
+        message_added = False
+        if mentions:
+            try:
+                mention_blocks = await resolve_mentions(mentions, self._tool_context.cwd)
+                if mention_blocks:
+                    # Build multimodal message: cleaned text + resolved content
+                    content_blocks = [{"type": "text", "text": cleaned_text}]
+                    content_blocks.extend(mention_blocks)
+                    if pending:
+                        content_blocks.extend(
+                            {"type": "image_url", "image_url": {"url": a.data_uri}} for a in pending
+                        )
+                    self._conversation.add_user_message(content_blocks)
+                    effective_input = ""  # Already added to conversation
+                    message_added = True
+            except Exception as exc:
+                logger.warning("Mention resolution failed: %s", exc)
+                # Fall through with original input
+
+        if pending and not message_added:
+            content_blocks = build_multimodal_message(
+                text=user_input,
+                images=[a.data_uri for a in pending],
+            )
+            self._conversation.add_user_message(content_blocks)
+            effective_input = ""  # Already added to conversation
+
+        # Run agent loop with context-aware thinking indicator
+        spinner = _ThinkingSpinner()
+
+        # Track per-tool-call timing: tool_name -> start_monotonic
+        _tool_timings: dict[str, float] = {}
+
+        def _track_tool_call(
+            tool_name: str,
+            args: dict[str, Any],
+            _s: _ThinkingSpinner = spinner,
+            _timings: dict[str, float] = _tool_timings,
+        ) -> None:
+            self._tool_calls += 1
+            _timings[tool_name] = time.monotonic()
+            _s.update(tool_name, args)
+            _s.stop()
+            format_tool_call(tool_name, args)
+
+        def _track_tool_result(
+            tool_name: str,
+            result: Any,
+            _s: _ThinkingSpinner = spinner,
+            _timings: dict[str, float] = _tool_timings,
+        ) -> None:
+            is_error = getattr(result, "is_error", False)
+            if is_error:
+                self._tool_errors += 1
+            _s.start()
+            output = getattr(result, "output", str(result))
+            error = getattr(result, "error", None)
+            display_text = str(error) if is_error and error else str(output)
+            # Calculate elapsed time for this tool call
+            start = _timings.pop(tool_name, None)
+            duration_ms = (time.monotonic() - start) * 1000 if start is not None else 0.0
+            _s.stop()
+            format_tool_result(tool_name, display_text, is_error=is_error, duration_ms=duration_ms)
+
+        def _track_permission_denied(
+            tool_name: str, reason: str, _s: _ThinkingSpinner = spinner
+        ) -> None:
+            self._tool_denied += 1
+            _s.stop()
+            format_permission_denied(tool_name, reason)
+
+        def _track_parallel_start(
+            calls: list[tuple[str, dict[str, Any]]],
+            _s: _ThinkingSpinner = spinner,
+        ) -> None:
+            _s.stop()
+            format_parallel_tool_calls(calls)
+
+        def _track_parallel_complete(
+            results: list[tuple[str, str, bool]],
+            _s: _ThinkingSpinner = spinner,
+        ) -> None:
+            format_parallel_results(results)
+            _s.start()
+
+        def _on_thinking(
+            text: str,
+            _s: _ThinkingSpinner = spinner,
+        ) -> None:
+            _s.stop()
+            format_thinking(text)
+            _s.start()
+
+        # Fresh cancel state per turn
+        self._cancel_event.clear()
+        # Reset SIGINT debounce timer so the "press twice" pattern
+        # starts fresh each turn.
+        self._last_sigint_monotonic = 0.0
+
+        try:
+            spinner.start()
+            await agent_loop(
+                user_input=effective_input if effective_input else user_input,
+                conversation=self._conversation,
+                llm_client=self._llm_client,
+                tool_registry=self._tool_registry,
+                tool_context=self._tool_context,
+                on_assistant_text=spinner.wrap(_on_assistant_text),
+                on_tool_call=_track_tool_call,
+                on_tool_result=_track_tool_result,
+                on_permission_denied=_track_permission_denied,
+                on_assistant_chunk=spinner.wrap(_on_assistant_chunk),
+                max_iterations=self._commands.max_iterations,
+                pause_event=self._pause_event,
+                cancel_event=self._cancel_event,
+                hook_executor=self._hook_executor,
+                skip_user_message=not effective_input,
+                on_parallel_start=_track_parallel_start,
+                on_parallel_complete=_track_parallel_complete,
+                on_thinking=_on_thinking,
+            )
+            _output.console.print()  # End streaming output with newline
+        except AgentCancelledError:
+            _output.console.print(
+                f"\n  [{DIM}]Agent cancelled. Send another prompt or /quit.[/{DIM}]"
+            )
+        except KeyboardInterrupt:
+            # Hard interrupt: user pressed Ctrl+C twice (or the loop-level
+            # signal handler wasn't installed on this platform). Treat
+            # same as cancel for display, but surface the distinct reason.
+            _output.console.print(f"\n  [{DIM}]Agent interrupted.[/{DIM}]")
+        except Exception as exc:
+            logger.error("Agent loop error: %s", exc, exc_info=True)
+            format_error(f"Agent error: {exc}")
+        finally:
+            spinner.stop()
+            if sigint_installed:
+                # Restore default SIGINT handling while we're waiting for
+                # the next prompt — otherwise a Ctrl+C at the prompt would
+                # silently set an unused cancel_event and swallow the key.
+                try:
+                    running_loop.remove_signal_handler(signal.SIGINT)
+                except (NotImplementedError, RuntimeError, ValueError):
+                    logger.debug("Could not remove SIGINT handler")
+
+            # Per-turn status HUD: compact one-line summary of tokens,
+            # cost, model, and turn count. Prints after spinner + output
+            # so it appears as the last line of the turn before the
+            # next prompt. Uses LLMClient's own accumulators so no
+            # session-state plumbing needed.
+            context_pct = (
+                self._conversation.token_count / self._conversation.max_tokens * 100
+                if self._conversation.max_tokens > 0
+                else 0
+            )
+            preset_tag = ""
+            for pname, pmodel in GodspeedSettings.MODEL_PRESETS.items():
+                if pmodel == self._llm_client.model:
+                    preset_tag = pname
+                    break
+            perm_mode = ""
+            if self._permission_engine is not None:
+                if getattr(self._permission_engine, "plan_mode", False):
+                    perm_mode = "plan"
+                else:
+                    perm_mode = getattr(self._permission_engine, "_mode", "normal")
+            max_iters = self._commands.max_iterations or 0
+            format_status_hud(
+                input_tokens=self._llm_client.total_input_tokens,
+                output_tokens=self._llm_client.total_output_tokens,
+                cost_usd=self._llm_client.total_cost_usd,
+                model=self._llm_client.model,
+                turns=self._turn_count,
+                budget_usd=getattr(self._llm_client, "max_cost_usd", 0.0),
+                max_iterations=max_iters,
+                context_pct=context_pct,
+                permission_mode=perm_mode,
+                preset=preset_tag,
+                goal=getattr(self._commands, "_session_goal", ""),
+            )
+
+            # Visual separator before the next prompt
+            if not is_compact_mode():
+                format_turn_separator(turn=self._turn_count)
+
+        return False
+
     def _get_permission_mode(self) -> str:
         """Return the current permission mode string for display."""
         if self._permission_engine is None:
@@ -259,9 +776,9 @@ class TUIApp:
     async def run(self) -> None:
         """Run the main TUI loop."""
         start_time = time.monotonic()
-        tool_calls = 0
-        tool_errors = 0
-        tool_denied = 0
+        self._tool_calls = 0
+        self._tool_errors = 0
+        self._tool_denied = 0
 
         # Background dream consolidation (non-blocking, 24h interval)
         if self._skill_dream is not None:
@@ -285,10 +802,13 @@ class TUIApp:
         )
 
         try:
+            history_path = self._tool_context.cwd / ".godspeed" / "history"
+            prompt_history = FileHistory(str(history_path))
             session: PromptSession[str] = PromptSession(
                 completer=self._completer,
                 key_bindings=self._key_bindings,
                 multiline=True,
+                history=prompt_history,
             )
         except Exception as exc:
             # prompt-toolkit fails in non-TTY contexts (piped input, CI, etc.)
@@ -312,6 +832,30 @@ class TUIApp:
             pass
 
         while True:
+            # Drain queued messages at the safe point between turns
+            queued = self._message_queue.drain()
+            if queued:
+                _output.console.print(
+                    f"  [{DIM}]Processing {len(queued)} queued message(s)...[/{DIM}]"
+                )
+                should_quit = False
+                for msg in queued:
+                    if await self._process_user_input(
+                        msg,
+                        running_loop=running_loop,
+                        sigint_installed=_sigint_installed,
+                    ):
+                        should_quit = True
+                        break
+                if should_quit:
+                    break
+                continue
+
+            # Dispatch a due /loop turn (recurring prompt) and process it
+            # immediately instead of waiting for the next user input.
+            if self._commands._maybe_dispatch_loop_turn():
+                continue
+
             # Compute context percentage for the prompt
             context_pct = (
                 self._conversation.token_count / self._conversation.max_tokens * 100
@@ -345,205 +889,12 @@ class TUIApp:
             if not user_input.strip():
                 continue
 
-            # Check for slash commands
-            cmd_result = self._commands.dispatch(user_input)
-            if cmd_result is not None:
-                if cmd_result.should_quit:
-                    break
-                continue
-
-            # Memory: detect and store user corrections
-            if self._correction_tracker is not None:
-                self._correction_tracker.check_for_correction(user_input)
-
-            # Echo user message with turn marker
-            self._turn_count += 1
-            _output.console.print()
-            _output.console.print(
-                f"  {styled(str(self._turn_count), NEUTRAL)}"
-                f" {styled(PROMPT_ICON, BOLD_PRIMARY)}"
-                f" {user_input.strip()}"
-            )
-
-            # Parse @-mentions from input and resolve to content blocks
-            effective_input = user_input
-
-            cleaned_text, mentions = parse_mentions(user_input)
-            if mentions:
-                try:
-                    mention_blocks = await resolve_mentions(mentions, self._tool_context.cwd)
-                    if mention_blocks:
-                        # Build multimodal message: cleaned text + resolved content
-
-                        content_blocks = [{"type": "text", "text": cleaned_text}]
-                        content_blocks.extend(mention_blocks)
-                        self._conversation.add_user_message(content_blocks)
-                        effective_input = ""  # Already added to conversation
-                except Exception as exc:
-                    logger.warning("Mention resolution failed: %s", exc)
-                    # Fall through with original input
-
-            # Run agent loop with context-aware thinking indicator
-            spinner = _ThinkingSpinner()
-
-            # Track per-tool-call timing: tool_name -> start_monotonic
-            _tool_timings: dict[str, float] = {}
-
-            def _track_tool_call(
-                tool_name: str,
-                args: dict[str, Any],
-                _s: _ThinkingSpinner = spinner,
-                _timings: dict[str, float] = _tool_timings,
-            ) -> None:
-                nonlocal tool_calls
-                tool_calls += 1
-                _timings[tool_name] = time.monotonic()
-                _s.update(tool_name, args)
-                _s.stop()
-                format_tool_call(tool_name, args)
-
-            def _track_tool_result(
-                tool_name: str,
-                result: Any,
-                _s: _ThinkingSpinner = spinner,
-                _timings: dict[str, float] = _tool_timings,
-            ) -> None:
-                nonlocal tool_errors
-                is_error = getattr(result, "is_error", False)
-                if is_error:
-                    tool_errors += 1
-                _s.start()
-                output = getattr(result, "output", str(result))
-                error = getattr(result, "error", None)
-                display_text = str(error) if is_error and error else str(output)
-                # Calculate elapsed time for this tool call
-                start = _timings.pop(tool_name, None)
-                duration_ms = (time.monotonic() - start) * 1000 if start is not None else 0.0
-                _s.stop()
-                format_tool_result(
-                    tool_name, display_text, is_error=is_error, duration_ms=duration_ms
-                )
-
-            def _track_permission_denied(
-                tool_name: str, reason: str, _s: _ThinkingSpinner = spinner
-            ) -> None:
-                nonlocal tool_denied
-                tool_denied += 1
-                _s.stop()
-                format_permission_denied(tool_name, reason)
-
-            def _track_parallel_start(
-                calls: list[tuple[str, dict[str, Any]]],
-                _s: _ThinkingSpinner = spinner,
-            ) -> None:
-                _s.stop()
-                format_parallel_tool_calls(calls)
-
-            def _track_parallel_complete(
-                results: list[tuple[str, str, bool]],
-                _s: _ThinkingSpinner = spinner,
-            ) -> None:
-                format_parallel_results(results)
-                _s.start()
-
-            def _on_thinking(
-                text: str,
-                _s: _ThinkingSpinner = spinner,
-            ) -> None:
-                _s.stop()
-                format_thinking(text)
-                _s.start()
-
-            # Fresh cancel state per turn
-            self._cancel_event.clear()
-            # Reset SIGINT debounce timer so the "press twice" pattern
-            # starts fresh each turn.
-            self._last_sigint_monotonic = 0.0
-
-            try:
-                spinner.start()
-                await agent_loop(
-                    user_input=effective_input if effective_input else user_input,
-                    conversation=self._conversation,
-                    llm_client=self._llm_client,
-                    tool_registry=self._tool_registry,
-                    tool_context=self._tool_context,
-                    on_assistant_text=spinner.wrap(_on_assistant_text),
-                    on_tool_call=_track_tool_call,
-                    on_tool_result=_track_tool_result,
-                    on_permission_denied=_track_permission_denied,
-                    on_assistant_chunk=spinner.wrap(_on_assistant_chunk),
-                    max_iterations=self._commands.max_iterations,
-                    pause_event=self._pause_event,
-                    cancel_event=self._cancel_event,
-                    hook_executor=self._hook_executor,
-                    skip_user_message=not effective_input,
-                    on_parallel_start=_track_parallel_start,
-                    on_parallel_complete=_track_parallel_complete,
-                    on_thinking=_on_thinking,
-                )
-                _output.console.print()  # End streaming output with newline
-            except AgentCancelledError:
-                _output.console.print(
-                    f"\n  [{DIM}]Agent cancelled. Send another prompt or /quit.[/{DIM}]"
-                )
-            except KeyboardInterrupt:
-                # Hard interrupt: user pressed Ctrl+C twice (or the loop-level
-                # signal handler wasn't installed on this platform). Treat
-                # same as cancel for display, but surface the distinct reason.
-                _output.console.print(f"\n  [{DIM}]Agent interrupted.[/{DIM}]")
-            except Exception as exc:
-                logger.error("Agent loop error: %s", exc, exc_info=True)
-                format_error(f"Agent error: {exc}")
-            finally:
-                spinner.stop()
-                if _sigint_installed:
-                    # Restore default SIGINT handling while we're waiting for
-                    # the next prompt ΓÇö otherwise a Ctrl+C at the prompt would
-                    # silently set an unused cancel_event and swallow the key.
-                    try:
-                        running_loop.remove_signal_handler(signal.SIGINT)
-                    except (NotImplementedError, RuntimeError, ValueError):
-                        logger.debug("Could not remove SIGINT handler")
-
-                # Per-turn status HUD: compact one-line summary of tokens,
-                # cost, model, and turn count. Prints after spinner + output
-                # so it appears as the last line of the turn before the
-                # next prompt. Uses LLMClient's own accumulators so no
-                # session-state plumbing needed.
-                context_pct = (
-                    self._conversation.token_count / self._conversation.max_tokens * 100
-                    if self._conversation.max_tokens > 0
-                    else 0
-                )
-                preset_tag = ""
-                for pname, pmodel in GodspeedSettings.MODEL_PRESETS.items():
-                    if pmodel == self._llm_client.model:
-                        preset_tag = pname
-                        break
-                perm_mode = ""
-                if self._permission_engine is not None:
-                    if getattr(self._permission_engine, "plan_mode", False):
-                        perm_mode = "plan"
-                    else:
-                        perm_mode = getattr(self._permission_engine, "_mode", "normal")
-                max_iters = self._commands.max_iterations or 0
-                format_status_hud(
-                    input_tokens=self._llm_client.total_input_tokens,
-                    output_tokens=self._llm_client.total_output_tokens,
-                    cost_usd=self._llm_client.total_cost_usd,
-                    model=self._llm_client.model,
-                    turns=self._turn_count,
-                    budget_usd=getattr(self._llm_client, "max_cost_usd", 0.0),
-                    max_iterations=max_iters,
-                    context_pct=context_pct,
-                    permission_mode=perm_mode,
-                    preset=preset_tag,
-                )
-
-                # Visual separator before the next prompt
-                if not is_compact_mode():
-                    format_turn_separator(turn=self._turn_count)
+            if await self._process_user_input(
+                user_input,
+                running_loop=running_loop,
+                sigint_installed=_sigint_installed,
+            ):
+                break
 
         # Session summary on exit
         duration = time.monotonic() - start_time
@@ -551,9 +902,9 @@ class TUIApp:
             duration_secs=duration,
             input_tokens=self._llm_client.total_input_tokens,
             output_tokens=self._llm_client.total_output_tokens,
-            tool_calls=tool_calls,
-            tool_errors=tool_errors,
-            tool_denied=tool_denied,
+            tool_calls=self._tool_calls,
+            tool_errors=self._tool_errors,
+            tool_denied=self._tool_denied,
             model=self._llm_client.model,
             session_id=self._session_id,
         )
@@ -561,7 +912,9 @@ class TUIApp:
         if self._session_memory is not None:
             self._session_memory.end_session(
                 self._session_id,
-                summary=f"turns={self._turn_count} tools={tool_calls} errors={tool_errors}",
+                summary=(
+                    f"turns={self._turn_count} tools={self._tool_calls} errors={self._tool_errors}"
+                ),
             )
         if self._audit_trail is not None:
             self._audit_trail.record(

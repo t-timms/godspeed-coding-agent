@@ -340,6 +340,7 @@ class ChatScreen(Screen):
                 cancel_event=self._cancel_event,
                 hook_executor=self._hook_executor,
                 on_thinking=_on_thinking,
+                task_store=getattr(self._commands, "_task_store", None),
             )
             chat_log.end_turn()
             chat_log.write()

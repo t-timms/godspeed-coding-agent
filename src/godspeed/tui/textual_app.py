@@ -175,6 +175,7 @@ class GodspeedTextualApp(App):
         execution_mode: str = "tool",
         audit_dir: Path | None = None,
         compact: bool = False,
+        resume_context: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
 
@@ -192,6 +193,7 @@ class GodspeedTextualApp(App):
         self._execution_mode = execution_mode
         self._audit_dir = audit_dir
         self._compact = compact
+        self._resume_context = resume_context
 
         self._splash = None
         self._llm_client = None
@@ -215,6 +217,7 @@ class GodspeedTextualApp(App):
         self._tool_errors = 0
         self._tool_denied = 0
         self._start_time = time.monotonic()
+        self._resume_notice: str | None = None
 
     def on_mount(self: Any) -> None:
         from godspeed.tui.screens.splash import SplashScreen
@@ -269,6 +272,18 @@ class GodspeedTextualApp(App):
                 tool_risk_levels=self._risk_levels,
             )
             self._permission_engine = permission_engine
+
+            from godspeed.security.plan_gate import PlanApprovalGate
+            from godspeed.tools.plan_gate import ExitPlanModeTool
+            from godspeed.tui.plan_gate import tui_plan_approval_prompt
+
+            self._plan_gate = PlanApprovalGate(
+                permission_engine=permission_engine,
+                approval_prompt=tui_plan_approval_prompt(self),
+            )
+            plan_gate_tool = ExitPlanModeTool(self._plan_gate)
+            self._tools.register(plan_gate_tool)
+            self._risk_levels[plan_gate_tool.name] = plan_gate_tool.risk_level
 
             audit_trail = None
             if settings.audit.enabled:
@@ -347,6 +362,7 @@ class GodspeedTextualApp(App):
                 router=router,
                 thinking_budget=settings.thinking_budget,
                 max_cost_usd=settings.max_cost_usd,
+                reasoning_effort=settings.reasoning_effort,
             )
             self._llm_client = llm_client
 
@@ -368,6 +384,9 @@ class GodspeedTextualApp(App):
                 conversation_logger=conversation_logger,
             )
             self._conversation = conversation
+
+            if self._resume_context is not None:
+                self._apply_resume_bootstrap(conversation)
 
             from godspeed.tui.commands import CommandResult, Commands
 
@@ -415,6 +434,10 @@ class GodspeedTextualApp(App):
                 correction_tracker=correction_tracker,
             )
             self.push_screen(self._chat_screen)
+            if self._resume_notice:
+                chat_log = self._chat_screen.query_one("#chat-log")
+                chat_log.write()
+                chat_log.write(f"  [dim]{self._resume_notice}[/dim]")
             _status("Ready")
             await asyncio.sleep(0)
 
@@ -435,6 +458,31 @@ class GodspeedTextualApp(App):
 
     def action_toggle_theme(self: Any) -> None:
         self.theme = "godspeed-light" if self.theme == "godspeed-dark" else "godspeed-dark"
+
+    def _apply_resume_bootstrap(self: Any, conversation: Any) -> None:
+        """Restore a resumed session's context into the conversation.
+
+        Restores the full message history when it was persisted; otherwise
+        injects a system message carrying the previous session's summary with
+        a ``[resumed: <id>]`` marker.
+        """
+        ctx = self._resume_context
+        if ctx is None:
+            return
+        resumed_id = ctx.get("session_id", "")
+        messages = ctx.get("messages")
+        summary = ctx.get("summary", "") or ""
+
+        if messages:
+            conversation.restore_messages(messages)
+        elif summary:
+            conversation.add_system_message(
+                f"[resumed: {resumed_id}]\n\nPrevious session summary:\n{summary}"
+            )
+
+        self._resume_notice = f"Resumed session {resumed_id}"
+        if summary:
+            self._resume_notice += f" — {summary.replace(chr(10), ' ')[:120]}"
 
     async def _init_background(
         self,
@@ -479,7 +527,11 @@ class GodspeedTextualApp(App):
                             definitions = await asyncio.wait_for(
                                 mcp_client.connect(config), timeout=10.0
                             )
-                            for tool in adapt_mcp_tools(definitions, mcp_client):
+                            for tool in adapt_mcp_tools(
+                                definitions,
+                                mcp_client,
+                                trusted_servers=frozenset(settings.mcp_trusted_servers),
+                            ):
                                 self._tools.register(tool)
                                 self._risk_levels[tool.name] = tool.risk_level
                         except TimeoutError:
@@ -501,13 +553,17 @@ class GodspeedTextualApp(App):
 
             from godspeed.skills.dream import SkillDream
             from godspeed.skills.evolution import SkillEvolution
-            from godspeed.skills.loader import SkillHub, discover_skills
+            from godspeed.skills.loader import (
+                SkillHub,
+                discover_skills,
+                filter_context_budget,
+            )
 
             skill_dirs = [
                 settings.global_dir / "skills",
                 effective_project_dir / ".godspeed" / "skills",
             ]
-            skills = discover_skills(skill_dirs)
+            skills = filter_context_budget(discover_skills(skill_dirs))
             skills_dir = Path.home() / ".godspeed" / "skills"
             self._skill_dream = SkillDream()
 
@@ -562,6 +618,10 @@ class GodspeedTextualApp(App):
         )
 
         if self._session_memory is not None:
+            if self._conversation is not None:
+                self._session_memory.save_messages(
+                    self._session_id, self._conversation.messages[1:]
+                )
             self._session_memory.end_session(
                 self._session_id,
                 summary=(
