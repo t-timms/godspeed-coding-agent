@@ -7,12 +7,21 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC
 from pathlib import Path
 from typing import Any, ClassVar
 
-from godspeed.config import append_permission_rule
+from godspeed.agent.output_styles import BUILT_IN_STYLES, load_custom_styles, resolve_style
+from godspeed.config import (
+    GodspeedSettings,
+    append_permission_rule,
+    set_output_style,
+)
+from godspeed.observability.metrics import LoopMetrics, Span, SpanStatus
+from godspeed.observability.otlp import export_otlp
+from godspeed.observability.usage_report import from_audit
 from godspeed.tui import output as _output
 from godspeed.tui.loop_state import (
     LOOP_DEFAULT_INTERVAL_SECONDS,
@@ -102,6 +111,8 @@ class Commands:
         self.whisper_mode: bool = False
         self._session_goal: str = ""
         self._loop_state = LoopState()
+        self._base_system_prompt = self._capture_base_system_prompt()
+        self._current_style = "default"
 
         self._handlers: dict[str, CommandHandler] = {}
         self._handlers["/help"] = self._cmd_help
@@ -154,6 +165,8 @@ class Commands:
         self._handlers["/code-review"] = self._cmd_code_review
         self._handlers["/security-review"] = self._cmd_security_review
         self._handlers["/simplify"] = self._cmd_simplify
+        self._handlers["/style"] = self._cmd_style
+        self._handlers["/metrics"] = self._cmd_metrics
 
         # Short aliases for power-user productivity
         self._handlers["/q"] = self._cmd_quit
@@ -179,6 +192,17 @@ class Commands:
     _codebase_index: Any | None = None
     _message_queue: Any | None = None
     _session_memory: Any | None = None
+
+    def _capture_base_system_prompt(self) -> str:
+        """Snapshot the system prompt at construction time.
+
+        The conversation always starts with a system message; ``/style``
+        appends its suffix to this base so styles compose cleanly.
+        """
+        messages = getattr(self._conversation, "messages", None)
+        if messages and messages[0].get("role") == "system":
+            return str(messages[0].get("content", ""))
+        return ""
 
     def register(self, name: str, handler: CommandHandler) -> None:
         """Register a custom slash command."""
@@ -232,6 +256,7 @@ class Commands:
                     ("/clear", "Clear conversation history"),
                     ("/stats", "Show token usage and estimated cost"),
                     (r"/usage \[scope]", "Show usage breakdown (tokens, tools, agents)"),
+                    ("/metrics [export [url]]", "Show session metrics or export spans via OTLP"),
                     ("/export [name]", "Export conversation as markdown"),
                     ("/correct <msg>", "Record a correction for future sessions"),
                     ("/preferences", "Show stored user preferences"),
@@ -258,6 +283,10 @@ class Commands:
                     ("/btw <question>", "Side-question without corrupting conversation"),
                     ("/goal [text|clear]", "Set, show, or clear the session goal"),
                     ("/effort low|medium|high", "Set reasoning effort (read at call time)"),
+                    (
+                        "/style [name]",
+                        "Switch output style (default, explanatory, learning, custom)",
+                    ),
                     (r"/loop \[interval] <prompt>", "prompt loops on interval"),
                 ],
             ),
@@ -306,7 +335,6 @@ class Commands:
 
     def _cmd_model(self, args: str = "") -> CommandResult:
         """Show or switch the active model. Supports preset names."""
-        from godspeed.config import GodspeedSettings
 
         arg = args.strip()
 
@@ -352,7 +380,6 @@ class Commands:
                         )
         else:
             model = self._llm_client.model
-            from godspeed.config import GodspeedSettings
 
             presets = GodspeedSettings.MODEL_PRESETS
             matched_preset = ""
@@ -1929,7 +1956,6 @@ class Commands:
         from rich.table import Table
 
         from godspeed.llm.cost import format_cost
-        from godspeed.observability.usage_report import from_audit
 
         if self._audit_trail is None:
             format_info("Audit trail is disabled — no tool-call data available.")
@@ -1987,7 +2013,7 @@ class Commands:
         from rich.table import Table
 
         from godspeed.llm.cost import format_cost
-        from godspeed.observability.usage_report import SubagentRow, from_audit
+        from godspeed.observability.usage_report import SubagentRow
 
         _output.console.print()
         _output.console.print(f"  {styled('Sub-Agent Usage', BOLD_PRIMARY)}")
@@ -2047,6 +2073,183 @@ class Commands:
                 padding=(0, 1),
             )
         )
+        return CommandResult(handled=True)
+
+    def _cmd_style(self, args: str = "") -> CommandResult:
+        """Switch the agent's output style.
+
+        Usage:
+            /style            — show the current style and available styles
+            /style <name>     — apply a built-in or custom style
+            /style default    — restore the base system prompt
+
+        Built-ins: default, explanatory, learning. Custom styles live in
+        .godspeed/styles/*.md. The choice is persisted to settings.yaml
+        when possible; on failure it degrades to session-only.
+        """
+        from rich.panel import Panel
+        from rich.table import Table
+
+        name = args.strip().lower()
+
+        if not name:
+            _output.console.print()
+            _output.console.print(f"  {styled('Output Style', BOLD_PRIMARY)}")
+            _output.console.print(f"  {styled(RULE_CHAR * 30, NEUTRAL)}")
+
+            table = Table(show_header=False, border_style=NEUTRAL, expand=False, padding=(0, 2))
+            table.add_column("Metric", style=TABLE_KEY)
+            table.add_column("Value", style=TABLE_VALUE)
+            table.add_row("Current", self._current_style)
+            _output.console.print(table)
+
+            available = list(BUILT_IN_STYLES) + sorted(load_custom_styles(self._cwd))
+            _output.console.print(
+                Panel(
+                    "Available: " + ", ".join(available),
+                    title="Styles",
+                    border_style=DIM,
+                    expand=False,
+                    padding=(0, 1),
+                )
+            )
+            return CommandResult(handled=True)
+
+        suffix = resolve_style(name, self._cwd)
+        if suffix is None and name != "default":
+            available = list(BUILT_IN_STYLES) + sorted(load_custom_styles(self._cwd))
+            format_error(f"Unknown style: {name}. Available: {', '.join(available)}")
+            return CommandResult(handled=True)
+
+        self._apply_style(name, suffix)
+        return CommandResult(handled=True)
+
+    def _apply_style(self, name: str, suffix: str | None) -> None:
+        """Apply a style suffix to the system prompt and persist the choice."""
+        content = self._base_system_prompt
+        if suffix:
+            content = f"{content}\n\n{suffix}"
+        self._conversation.set_system_prompt(content)
+        self._current_style = name
+
+        if set_output_style(name, self._cwd) is None:
+            format_warning(
+                f"Style '{name}' applied for this session only — "
+                "could not persist to settings.yaml."
+            )
+        else:
+            format_success(f"Output style set to '{name}'.")
+
+    def _cmd_metrics(self, args: str = "") -> CommandResult:
+        """Show session metrics or export spans via OTLP.
+
+        Usage:
+            /metrics              — render a LoopMetrics snapshot
+            /metrics export       — export to the configured endpoint
+            /metrics export <url> — export to an explicit endpoint
+
+        The TUI does not wire a live metrics collector, so the snapshot
+        shows what is actually measurable: LLM client totals and audit
+        trail tool-call counts. Unmeasured dimensions are stated as gaps.
+        """
+        parts = args.strip().split(maxsplit=1)
+        if parts and parts[0].lower() == "export":
+            endpoint = parts[1].strip() if len(parts) > 1 else ""
+            return self._metrics_export(endpoint)
+        if parts:
+            format_error(f"Unknown subcommand: {parts[0]}. Use /metrics or /metrics export [url].")
+            return CommandResult(handled=True)
+        return self._metrics_snapshot()
+
+    def _metrics_snapshot(self) -> CommandResult:
+        """Render a LoopMetrics snapshot from measurable session data."""
+        from rich.panel import Panel
+        from rich.table import Table
+
+        metrics = LoopMetrics()
+        if self._audit_trail is not None:
+            report = from_audit(self._audit_trail)
+            metrics.tool_calls_total = sum(row.calls for row in report.by_tool.values())
+
+        _output.console.print()
+        _output.console.print(f"  {styled('Session Metrics', BOLD_PRIMARY)}")
+        _output.console.print(f"  {styled(RULE_CHAR * 30, NEUTRAL)}")
+
+        table = Table(show_header=False, border_style=NEUTRAL, expand=False, padding=(0, 2))
+        table.add_column("Metric", style=TABLE_KEY)
+        table.add_column("Value", style=TABLE_VALUE, justify="right")
+        for key, value in metrics.to_dict().items():
+            label = key.replace("_", " ").title()
+            if isinstance(value, int):
+                table.add_row(label, f"{value:,}")
+            elif isinstance(value, float):
+                table.add_row(label, f"{value:,.2f}")
+            elif isinstance(value, dict):
+                table.add_row(label, ", ".join(f"{k}={v}" for k, v in value.items()))
+            else:
+                table.add_row(label, str(value))
+        _output.console.print(table)
+
+        _output.console.print(
+            Panel(
+                "The TUI does not wire a live metrics collector: iterations, "
+                "latency, and token velocity are only measured in headless "
+                "runs. Tool-call totals come from the audit trail; token "
+                "totals from the LLM client.",
+                title="Note",
+                border_style=DIM,
+                expand=False,
+                padding=(0, 1),
+            )
+        )
+        return CommandResult(handled=True)
+
+    def _metrics_export(self, endpoint: str) -> CommandResult:
+        """Export a synthetic session span via OTLP/HTTP-JSON."""
+        if not endpoint:
+            endpoint = GodspeedSettings().metrics_export.endpoint
+        if not endpoint:
+            format_info(
+                "No export endpoint configured. Set metrics_export.endpoint "
+                "in settings.yaml or pass one: /metrics export <url>"
+            )
+            return CommandResult(handled=True)
+
+        now = time.time()
+        tool_calls = 0
+        if self._audit_trail is not None:
+            report = from_audit(self._audit_trail)
+            tool_calls = sum(row.calls for row in report.by_tool.values())
+
+        cost = getattr(self._llm_client, "total_cost_usd", None)
+        if not isinstance(cost, (int, float)):
+            cost = 0.0
+
+        span = Span(
+            name="session",
+            trace_id=uuid.uuid4().hex,
+            span_id=uuid.uuid4().hex,
+            parent_span_id=None,
+            start_time=now,
+            end_time=now,
+            status=SpanStatus.OK,
+            attributes={
+                "session.id": self._session_id,
+                "model": self._llm_client.model,
+                "input_tokens": self._llm_client.total_input_tokens,
+                "output_tokens": self._llm_client.total_output_tokens,
+                "cost_usd": cost,
+                "tool_calls": tool_calls,
+            },
+        )
+
+        result = export_otlp([span], endpoint)
+        if result.ok:
+            format_success(f"Exported session span to {endpoint} (HTTP {result.status}).")
+        else:
+            format_error(f"Export failed: {result.error}")
+        return CommandResult(handled=True)
+
         return CommandResult(handled=True)
 
     def _cmd_export(self, args: str = "") -> CommandResult:
@@ -2349,7 +2552,6 @@ Describe what this skill does here.
         """List installed Ollama models and available presets."""
         from rich.table import Table
 
-        from godspeed.config import GodspeedSettings
         from godspeed.tools.ollama_manager import list_models
 
         presets = GodspeedSettings.MODEL_PRESETS

@@ -191,6 +191,17 @@ class Conversation:
         self._messages = [dict(m) for m in messages]
         self._invalidate_caches()
 
+    def set_system_prompt(self, content: str) -> None:
+        """Replace the system prompt in place.
+
+        Used by ``/style`` to swap output-style suffixes without rebuilding
+        the conversation. Invalidates caches so token counts recompute.
+        """
+        self._system_message = {"role": "system", "content": content}
+        self._invalidate_caches()
+        if self._logger is not None:
+            self._logger.log_system(content)
+
     def add_system_message(self, content: str) -> None:
         """Inject an additional system message into the conversation.
 
