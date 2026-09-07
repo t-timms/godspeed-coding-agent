@@ -117,7 +117,7 @@ def _detect_windows_shell() -> list[str]:
 
     if git_bash is None:
         path_bash = shutil.which("bash")
-        if path_bash and "windowsapps" not in Path(path_bash).parts[-2].lower():
+        if path_bash and "windowsapps" not in path_bash.lower():
             git_bash = path_bash
 
     if git_bash:

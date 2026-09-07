@@ -253,7 +253,10 @@ class TestClaudeCodeAdapter:
         hooks = ClaudeCodeAdapter.translate(config)
         assert hooks == []
 
-    def test_from_json(self, tmp_path: Path) -> None:
+    def test_from_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The pre-trust gate only accepts user-owned config locations, so
+        # simulate one by pointing Path.home at the tmp_path.
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         path = tmp_path / "claude.json"
         path.write_text(
             json.dumps(
@@ -296,7 +299,10 @@ class TestOpenCodeAdapter:
         hooks = OpenCodeAdapter.translate(config)
         assert hooks == []
 
-    def test_from_json(self, tmp_path: Path) -> None:
+    def test_from_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The pre-trust gate only accepts user-owned config locations, so
+        # simulate one by pointing Path.home at the tmp_path.
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
         path = tmp_path / "opencode.json"
         path.write_text(
             json.dumps([{"event": "stop", "command": "echo stop"}]),
