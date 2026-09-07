@@ -562,7 +562,7 @@ class TUIApp:
                 mention_blocks = await resolve_mentions(mentions, self._tool_context.cwd)
                 if mention_blocks:
                     # Build multimodal message: cleaned text + resolved content
-                    content_blocks = [{"type": "text", "text": cleaned_text}]
+                    content_blocks: list[dict[str, Any]] = [{"type": "text", "text": cleaned_text}]
                     content_blocks.extend(mention_blocks)
                     if pending:
                         content_blocks.extend(
