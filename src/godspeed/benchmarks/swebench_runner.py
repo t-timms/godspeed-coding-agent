@@ -13,11 +13,18 @@ rotation manager for rate-limited free-tier API access. Supports:
 
 Usage:
     # Via Python module
-    python -m godspeed.benchmarks.swebench \\
+    python -m godspeed.benchmarks.swebench_runner \\
         --model nvidia_nim/deepseek-ai/deepseek-v4-pro \\
         --split test \\
         --instances 300 \\
         --parallel 4
+
+    # Offline dry-run (no network, no LLM) with a local instances file:
+    python -m godspeed.benchmarks.swebench_runner \\
+        --model nvidia_nim/deepseek-ai/deepseek-v4-pro \\
+        --split test \\
+        --dry-run \\
+        --instances-file path/to/instances.jsonl
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import os
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from godspeed.benchmarks.nim_key_rotation import NIMKeyManager
@@ -41,6 +49,41 @@ INSTANCE_COOLDOWN_S = 5
 MAX_ITERATIONS = 40
 DEFAULT_TOOL_SET = "local"
 HEARTBEAT_INTERVAL = 10  # log heartbeat every N instances
+
+InstanceLoader = Callable[[str], list[dict]]
+
+
+def load_instances_from_file(path: str | Path) -> InstanceLoader:
+    """Return an instance loader that reads SWE-bench instances from a local JSONL file.
+
+    Each line must be a JSON object with at least ``instance_id``, ``repo``,
+    ``base_commit`` and ``problem_statement``.  The returned loader ignores
+    the ``split`` argument (the file already selects the instances).
+    """
+
+    def _loader(split: str) -> list[dict]:  # noqa: ARG001 - interface contract
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"Instances file not found: {p}")
+        instances: list[dict] = []
+        # utf-8-sig tolerates a UTF-8 BOM (PowerShell 5.1 Set-Content writes one)
+        for line in p.read_text(encoding="utf-8-sig").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                inst = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"Invalid JSON in instances file {p}: {e}") from e
+            if not isinstance(inst, dict):
+                raise ValueError(
+                    f"Instances file {p} must contain JSON objects, got {type(inst).__name__}"
+                )
+            instances.append(inst)
+        return instances
+
+    return _loader
+
 
 # ---------------------------------------------------------------------------
 # Structured per-run logging
@@ -282,12 +325,30 @@ async def run_swebench(
     tool_set: str = DEFAULT_TOOL_SET,
     nim_key_manager: NIMKeyManager | None = None,
     log_dir: Path | None = None,
+    dry_run: bool = False,
+    instance_loader: InstanceLoader | None = None,
 ) -> dict:
     """Run Godspeed against SWE-bench instances with NIM key rotation.
 
     Returns a summary dict with {total, resolved, errors, cost_usd, wall_s}.
+
+    Parameters
+    ----------
+    dry_run:
+        When ``True``, validate configuration and compute the instance plan
+        without invoking any LLM, cloning any repo, or downloading any
+        dataset.  The dataset loader is still called unless ``instance_loader``
+        is provided; pass a stub to keep the dry-run fully offline.
+    instance_loader:
+        Injectable ``(split) -> list[dict]`` dataset loader.  ``None`` uses
+        the real ``experiments.swebench_lite.run._load_instances`` (network).
     """
-    from experiments.swebench_lite.run import _already_predicted, _filter, _load_instances
+    from experiments.swebench_lite.run import _already_predicted, _filter
+
+    if instance_loader is None:
+        from experiments.swebench_lite.run import _load_instances
+
+        instance_loader = _load_instances
 
     out_dir = Path("benchmarks/results") if out is None else out.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -296,7 +357,7 @@ async def run_swebench(
 
     run_log = RunLogger(log_dir or out_dir / "logs" / time.strftime("run_%Y-%m-%d_%H"))
 
-    instances_list = _load_instances(split)
+    instances_list = instance_loader(split)
     instances_list = _filter(instances_list, instance_ids, instances)
     already = _already_predicted(predictions_path) if resume else set()
     to_run = [i for i in instances_list if i["instance_id"] not in already]
@@ -331,6 +392,23 @@ async def run_swebench(
         "model": model,
         "split": split,
     }
+
+    if dry_run:
+        summary["dry_run"] = True
+        summary["instance_ids"] = [i["instance_id"] for i in to_run]
+        summary["nim_keys_configured"] = nim_key_manager.key_count if nim_key_manager else 0
+        summary["predictions_path"] = str(predictions_path)
+        summary["metrics_path"] = str(metrics_path)
+        summary["log_dir"] = str(run_log.log_dir)
+        logger.info(
+            "DRY-RUN: would run %d instances (model=%s split=%s parallel=%d)",
+            len(to_run),
+            model,
+            split,
+            parallel,
+        )
+        return summary
+
     t_start = time.monotonic()
 
     for idx, inst in enumerate(to_run, 1):
@@ -397,6 +475,13 @@ def main() -> int:
     parser.add_argument("--split", default="test", choices=["dev", "test"])
     parser.add_argument("--instances", type=int, default=None, help="Cap on number of instances")
     parser.add_argument("--instance-ids", nargs="*", default=None, help="Specific instance IDs")
+    parser.add_argument(
+        "--instances-file",
+        type=Path,
+        default=None,
+        help="Local JSONL file of SWE-bench instances. When set, the dataset "
+        "loader is replaced with this file (fully offline).",
+    )
     parser.add_argument("--out", type=Path, default=None, help="Predictions output path")
     parser.add_argument("--metrics", type=Path, default=None, help="Metrics output path")
     parser.add_argument("--parallel", type=int, default=1, help="Parallel instances")
@@ -409,7 +494,18 @@ def main() -> int:
     parser.add_argument("--architect", action="store_true")
     parser.add_argument("--no-resume", dest="resume", action="store_false", default=True)
     parser.add_argument("--allow-web-search", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config and print the instance plan without running any "
+        "instance, cloning repos, or calling an LLM. Requires a dataset loader; "
+        "pass --instance-ids with a local loader to stay fully offline.",
+    )
     args = parser.parse_args()
+
+    instance_loader = None
+    if args.instances_file is not None:
+        instance_loader = load_instances_from_file(args.instances_file)
 
     summary = asyncio.run(
         run_swebench(
@@ -428,6 +524,8 @@ def main() -> int:
             architect=args.architect,
             resume=args.resume,
             allow_web_search=args.allow_web_search,
+            dry_run=args.dry_run,
+            instance_loader=instance_loader,
         )
     )
     logger.info("\nSummary: %s", json.dumps(summary, indent=2))

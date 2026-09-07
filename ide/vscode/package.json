@@ -1,0 +1,80 @@
+{
+  "name": "godspeed-coding-agent",
+  "displayName": "Godspeed Coding Agent",
+  "description": "Run Godspeed coding agent tasks from VS Code — send files, selections, and diffs to godspeed run.",
+  "version": "0.1.0",
+  "publisher": "godspeed",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/t-timms/godspeed-coding-agent"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:godspeed.runTask",
+    "onCommand:godspeed.explainSelection",
+    "onCommand:godspeed.reviewDiff",
+    "onCommand:godspeed.resume"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "godspeed.runTask",
+        "title": "Godspeed: Run Task",
+        "description": "Send editor selection or a prompted task to godspeed run"
+      },
+      {
+        "command": "godspeed.explainSelection",
+        "title": "Godspeed: Explain Selection",
+        "description": "Ask Godspeed to explain the current editor selection"
+      },
+      {
+        "command": "godspeed.reviewDiff",
+        "title": "Godspeed: Review Diff",
+        "description": "Run a review-style prompt against git diff output"
+      },
+      {
+        "command": "godspeed.resume",
+        "title": "Godspeed: Resume Session",
+        "description": "Open an integrated terminal running godspeed --continue"
+      }
+    ],
+    "configuration": {
+      "title": "Godspeed Coding Agent",
+      "properties": {
+        "godspeed.executablePath": {
+          "type": "string",
+          "default": "godspeed",
+          "description": "Path to the godspeed executable. Use an absolute path if godspeed is not on your PATH."
+        },
+        "godspeed.defaultTimeout": {
+          "type": "integer",
+          "default": 0,
+          "minimum": 0,
+          "description": "Default wall-clock timeout in seconds for godspeed run (0 = no limit)."
+        },
+        "godspeed.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model override passed to godspeed run via --model. Leave empty to use the default model."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "tsc -p ./",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {}
+}

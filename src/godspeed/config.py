@@ -261,6 +261,19 @@ class BatchSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
 
+class MetricsExportSettings(BaseSettings):
+    """OTLP metrics export configuration.
+
+    ``endpoint`` is the base OTLP/HTTP collector URL (e.g.
+    ``http://localhost:4318``). Spans are POSTed to
+    ``{endpoint}/v1/traces``. Empty (default) disables export.
+    """
+
+    endpoint: str = ""
+
+    model_config = SettingsConfigDict(extra="ignore")
+
+
 class GodspeedSettings(BaseSettings):
     """Root configuration for Godspeed."""
 
@@ -354,6 +367,11 @@ class GodspeedSettings(BaseSettings):
     # Reasoning effort — for reasoning-capable models (o1, o3, o4-mini, etc.)
     reasoning_effort: str = ""  # "", "low", "medium", "high"
 
+    # Output style — system-prompt suffix shaping how the agent presents
+    # work. Built-ins: "default", "explanatory", "learning"; custom styles
+    # live in .godspeed/styles/*.md. Switched at runtime with /style.
+    output_style: str = "default"
+
     # Architect mode — two-model pipeline (plan then execute)
     architect_model: str = ""  # model for planning phase; empty = use main model
 
@@ -396,6 +414,7 @@ class GodspeedSettings(BaseSettings):
     sandbox_settings: SandboxSettings = Field(default_factory=SandboxSettings)
     statusline: StatuslineSettings = Field(default_factory=StatuslineSettings)
     batch: BatchSettings = Field(default_factory=BatchSettings)
+    metrics_export: MetricsExportSettings = Field(default_factory=MetricsExportSettings)
 
     @model_validator(mode="after")
     def reconcile_sandbox_modes(self) -> GodspeedSettings:
@@ -693,6 +712,45 @@ def append_allow_rule(pattern: str, project_dir: Path | None = None) -> bool:
     return append_permission_rule(pattern, "allow", project_dir) is not None
 
 
+def set_output_style(name: str, project_dir: Path | None = None) -> Path | None:
+    """Persist the active output style to ``settings.yaml``.
+
+    Reads existing YAML, sets the top-level ``output_style`` key, writes
+    back. Preserves existing content. Returns the written path, or
+    ``None`` on OS error.
+    """
+    if project_dir is not None:
+        settings_path = project_dir / ".godspeed" / "settings.yaml"
+    else:
+        settings_path = DEFAULT_GLOBAL_DIR / "settings.yaml"
+
+    try:
+        if settings_path.exists() and settings_path.is_file():
+            with open(settings_path, encoding="utf-8") as f:
+                try:
+                    data = yaml.safe_load(f) or {}
+                except yaml.YAMLError as exc:
+                    logger.warning("Malformed %s: %s — rebuilding", settings_path, exc)
+                    data = {}
+        else:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            data = {}
+
+        if not isinstance(data, dict):
+            data = {}
+
+        data["output_style"] = name
+
+        with open(settings_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+
+        logger.info("Wrote output_style=%s to %s", name, settings_path)
+        return settings_path
+    except OSError as exc:
+        logger.warning("Failed to write output_style=%s: %s", name, exc)
+        return None
+
+
 def append_mcp_server(
     entry: dict[str, Any],
     project_dir: Path | None = None,
@@ -856,6 +914,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset(
         "thinking_budget",
         "max_cost_usd",
         "reasoning_effort",
+        "output_style",
         "architect_model",
         "cheap_model",
         "strong_model",
@@ -873,6 +932,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset(
         "context",
         "statusline",
         "batch",
+        "metrics_export",
     }
 )
 
