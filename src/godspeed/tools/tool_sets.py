@@ -50,6 +50,7 @@ _EXPLICIT_LOCAL_TOOL_NAMES: frozenset[str] = frozenset(
         "tasks",
         "background_check",
         "db_query",
+        "exit_plan_mode",
     }
 )
 

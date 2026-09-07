@@ -150,7 +150,8 @@ class TestDetectShell:
         shell_mod._shell_cache = None
         with patch("godspeed.tools.shell.platform.system", return_value="Windows"):
             with patch("godspeed.tools.shell.shutil.which", return_value=None):
-                result = _detect_shell()
+                with patch.object(shell_mod, "_WINDOWS_GIT_BASH_CANDIDATES", new=()):
+                    result = _detect_shell()
         assert result == ["cmd.exe", "/c"]
 
     def test_detect_shell_unix(self) -> None:

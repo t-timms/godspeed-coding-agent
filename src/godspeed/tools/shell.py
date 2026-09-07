@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import platform
 import shutil
 import subprocess
 import threading
+from pathlib import Path
 from typing import Any
 
 from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
@@ -72,6 +74,15 @@ def _kill_process_tree(pid: int) -> None:
 _shell_cache: list[str] | None = None
 _shell_lock = threading.Lock()
 
+_WINDOWS_GIT_BASH_CANDIDATES: tuple[Path, ...] = (
+    Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Git" / "bin" / "bash.exe",
+    Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"))
+    / "Git"
+    / "bin"
+    / "bash.exe",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Git" / "bin" / "bash.exe",
+)
+
 
 def _detect_shell() -> list[str]:
     """Return the shell command prefix for the current platform (cached, thread-safe)."""
@@ -83,9 +94,35 @@ def _detect_shell() -> list[str]:
             if platform.system() != "Windows":
                 _shell_cache = ["/bin/bash", "-c"]
             else:
-                git_bash = shutil.which("bash")
-                _shell_cache = [git_bash, "-c"] if git_bash else ["cmd.exe", "/c"]
+                _shell_cache = _detect_windows_shell()
     return _shell_cache
+
+
+def _detect_windows_shell() -> list[str]:
+    """Pick the best available Windows shell prefix.
+
+    Preference order:
+    1. Git Bash from standard install locations (real bash, POSIX semantics).
+    2. Git Bash found on PATH — but never the Microsoft Store WSL stub in
+       ``WindowsApps``, which is broken when WSL is not installed and fails
+       with ``REGDB_E_CLASSNOTREG`` + UTF-16 stderr.
+    3. ``cmd.exe /c`` as the final fallback.
+    """
+    git_bash: str | None = None
+
+    for candidate in _WINDOWS_GIT_BASH_CANDIDATES:
+        if candidate.is_file():
+            git_bash = str(candidate)
+            break
+
+    if git_bash is None:
+        path_bash = shutil.which("bash")
+        if path_bash and "windowsapps" not in Path(path_bash).parts[-2].lower():
+            git_bash = path_bash
+
+    if git_bash:
+        return [git_bash, "-c"]
+    return ["cmd.exe", "/c"]
 
 
 class ShellTool(Tool):
@@ -153,6 +190,16 @@ class ShellTool(Tool):
             return ToolResult.failure(
                 f"Command exceeds maximum length of {MAX_COMMAND_LENGTH} characters"
             )
+
+        # Validate command against sandbox blocked paths
+        from godspeed.sandbox.policy import validate_shell_command
+
+        sandbox = context.sandbox
+        if sandbox is not None:
+            allowed, reason = validate_shell_command(command, sandbox)
+            if not allowed:
+                logger.warning("Shell command blocked by sandbox: %s", reason)
+                return ToolResult.failure(f"Blocked by sandbox policy: {reason}")
 
         # Background execution
         if arguments.get("background", False):

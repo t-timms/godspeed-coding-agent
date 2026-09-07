@@ -24,7 +24,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+from godspeed.tools.base import WEB_CALL_SESSION_CAP, RiskLevel, Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +228,10 @@ class WebFetchTool(Tool):
 
         if not url.startswith(("http://", "https://")):
             return ToolResult.failure("url must start with http:// or https://")
+
+        context.web_call_count += 1
+        if context.web_call_count > WEB_CALL_SESSION_CAP:
+            return ToolResult.failure(f"Session web-call cap ({WEB_CALL_SESSION_CAP}) reached")
 
         # Block local/private network access
         if _is_local_url(url):
