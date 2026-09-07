@@ -3051,6 +3051,7 @@ class TestStreamingCallAdditional:
         # Either markdown parser parsed tool calls or we got the raw content
         assert result in ("contents", "") or "file_read" in result
 
+
 class TestSafetyHookFiring:
     """Advisory DANGEROUS_COMMAND / SECRET_DETECTED hooks fire during evaluation."""
 

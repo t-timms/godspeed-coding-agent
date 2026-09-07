@@ -99,6 +99,7 @@ def _make_fd(path: str):
 
     return FileDiagnostics(file_path=path, diagnostics=[], timestamp=0.0)
 
+
 class TestContextAssemblerLayer1:
     def test_set_core_prompt_invalidates_layer1_cache(self, tmp_path: Path) -> None:
         assembler = ContextAssembler(cwd=tmp_path)

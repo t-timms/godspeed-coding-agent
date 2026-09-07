@@ -606,6 +606,7 @@ class TestAppendPermissionRule:
         assert result == global_dir / "settings.yaml"
         assert result.exists()
 
+
 class TestSandboxReconcile:
     """sandbox field syncs into sandbox_settings.mode (single source of truth)."""
 

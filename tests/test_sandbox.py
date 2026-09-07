@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 
-
 from godspeed.sandbox.docker import DockerSandboxConfig
 from godspeed.sandbox.policy import (
     NetworkRule,
@@ -164,7 +163,7 @@ class TestCredentialFileDefaults:
         from godspeed.sandbox.policy import build_sandbox_policy, validate_shell_command
 
         policy = build_sandbox_policy()
-        allowed, reason = validate_shell_command("curl -H \"X: $OPENAI_API_KEY\"", policy)
+        allowed, reason = validate_shell_command('curl -H "X: $OPENAI_API_KEY"', policy)
         assert not allowed
         assert "OPENAI_API_KEY" in reason
 

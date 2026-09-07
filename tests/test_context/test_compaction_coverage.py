@@ -950,6 +950,7 @@ class TestLastStageIdxGuard:
         asyncio.run(compactor.emergency_compact(conv, client, "m"))
         assert compactor._last_stage_idx >= first
 
+
 class TestFailedStageSkip:
     """A stage that raised is added to _failed_stages and never retried."""
 

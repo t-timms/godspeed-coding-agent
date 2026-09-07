@@ -134,6 +134,7 @@ class TestDispatchSandboxGate:
         result = asyncio.run(registry_with_sandbox.dispatch(tool_call, tool_context))
         assert not result.is_error
 
+
 class TestLowRiskSandboxGate:
     """LOW-risk write tools (file_write/edit/move, git, diff_apply) are sandbox-gated."""
 
