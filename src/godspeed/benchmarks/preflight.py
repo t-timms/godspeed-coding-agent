@@ -20,8 +20,10 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +51,49 @@ class PreFlightReport:
         if not passed:
             self.all_passed = False
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable summary of the report."""
+        return {
+            "all_passed": self.all_passed,
+            "checks": [
+                {"name": r.name, "passed": r.passed, "detail": r.detail, "fatal": r.fatal}
+                for r in self.results
+            ],
+        }
 
-def check_nim_connectivity(report: PreFlightReport, keys_env: str = "NVIDIA_NIM_API_KEYS") -> None:
-    """Verify NIM API keys can authenticate against the NVIDIA endpoint."""
+
+def _default_fetch(url: str, *, headers: dict[str, str] | None = None, timeout: int = 10) -> Any:
+    """Production fetcher — hits the real network."""
+    import urllib.request
+
+    req = urllib.request.Request(url, headers=headers or {})  # noqa: S310
+    return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
+
+
+FetchFn = Callable[[str, dict[str, str] | None, int], Any]
+
+
+def check_nim_connectivity(
+    report: PreFlightReport,
+    *,
+    keys_env: str = "NVIDIA_NIM_API_KEYS",
+    fetcher: FetchFn | None = None,
+) -> None:
+    """Verify NIM API keys can authenticate against the NVIDIA endpoint.
+
+    Parameters
+    ----------
+    report:
+        Accumulator for check results.
+    keys_env:
+        Primary environment variable name to read keys from.
+    fetcher:
+        Injectable HTTP fetcher ``(url, headers, timeout) -> response``.
+        ``None`` (default) uses the real network.  Pass a stub for offline
+        testing — the stub may raise ``OSError`` to simulate offline mode.
+    """
+    _fetch = fetcher if fetcher is not None else _default_fetch
+
     raw = os.environ.get(keys_env, os.environ.get("NVIDIA_NIM_API_KEY", ""))
     if not raw:
         report.add(
@@ -66,16 +108,14 @@ def check_nim_connectivity(report: PreFlightReport, keys_env: str = "NVIDIA_NIM_
 
     report.add("NIM key count", True, f"{len(keys)} key(s) configured")
 
-    import urllib.request
-
     healthy = 0
     for i, key in enumerate(keys, 1):
         try:
-            req = urllib.request.Request(  # noqa: S310
+            _fetch(
                 f"{NIM_ENDPOINT}/models",
-                headers={"Authorization": f"Bearer {key}"},
+                {"Authorization": f"Bearer {key}"},
+                10,
             )
-            urllib.request.urlopen(req, timeout=10)  # noqa: S310
             healthy += 1
         except Exception as e:  # noqa: BLE001
             error = str(e)[:120]
@@ -89,6 +129,33 @@ def check_nim_connectivity(report: PreFlightReport, keys_env: str = "NVIDIA_NIM_
         report.add("NIM connectivity", True, f"All {len(keys)} keys authenticated")
 
 
+def _evict_partial_module(pkg: str) -> None:
+    """Remove a partially initialized package from sys.modules.
+
+    A crashed first import leaves the half-built module cached, so every
+    later ``import`` in the process returns the broken object. Evicting
+    the package and its submodules lets the next import retry cleanly.
+    """
+    for mod_name in [m for m in sys.modules if m == pkg or m.startswith(pkg + ".")]:
+        sys.modules.pop(mod_name, None)
+
+
+def _prebind_litellm_deps() -> None:
+    """Import aiohttp submodules litellm touches at its import time.
+
+    litellm's ``aiohttp_transport`` reads ``aiohttp.client_exceptions`` at
+    module level. aiohttp uses lazy attribute loading, so if that
+    submodule is not pre-imported, litellm's first import crashes with a
+    confusing AttributeError that then leaves litellm half-initialized in
+    sys.modules. Importing it here is cheap and makes the litellm import
+    deterministic regardless of environment.
+    """
+    try:
+        import aiohttp.client_exceptions  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("aiohttp.client_exceptions pre-import failed: %s", exc)
+
+
 def check_python_env(report: PreFlightReport) -> None:
     """Verify required Python packages are importable."""
     packages = {
@@ -97,14 +164,30 @@ def check_python_env(report: PreFlightReport) -> None:
         "datasets": "HuggingFace datasets (SWE-bench)",
     }
     for pkg, label in packages.items():
+        if pkg == "litellm":
+            _prebind_litellm_deps()
         try:
             __import__(pkg)
             report.add(f"Python: {label}", True, "installed")
-        except ImportError:
+        except Exception as e:  # noqa: BLE001
+            # Import can fail with more than ImportError (e.g. litellm's
+            # circular-import AttributeError). Treat any import failure as a
+            # failed check rather than crashing the whole pre-flight.
+            #
+            # A failed first import can leave a third-party package PARTIALLY
+            # initialized in sys.modules, poisoning every later import in the
+            # process (litellm does this). Evict third-party packages so a
+            # later clean import attempt gets a fresh start — but never evict
+            # the godspeed package itself: mid-session eviction splits the
+            # module universe (live references keep the old objects while
+            # fresh imports build new ones), which breaks monkeypatching and
+            # isinstance checks for the rest of the process.
+            if pkg != "godspeed":
+                _evict_partial_module(pkg)
             report.add(
                 f"Python: {label}",
                 False,
-                f"{pkg} not installed — run: pip install {pkg}",
+                f"{pkg} import failed: {type(e).__name__}: {str(e)[:120]}",
                 fatal=pkg == "godspeed",
             )
 
@@ -185,7 +268,7 @@ def check_disk_space(report: PreFlightReport, min_gb: int = MIN_DISK_GB) -> None
         usage = shutil.disk_usage(Path.cwd())
         free_gb = usage.free / (1024**3)
         if free_gb >= min_gb:
-            report.add("Disk space", True, f"{free_gb:.1f} GB free (≥ {min_gb} GB required)")
+            report.add("Disk space", True, f"{free_gb:.1f} GB free (>= {min_gb} GB required)")
         else:
             report.add(
                 "Disk space",
@@ -208,12 +291,34 @@ def check_nim_rpm(report: PreFlightReport, keys_env: str = "NVIDIA_NIM_API_KEYS"
     report.add("NIM RPM capacity", True, f"{len(keys)} keys x 30 RPM = {rpm} RPM effective")
 
 
-def run_all_checks() -> PreFlightReport:
-    """Run all pre-flight checks. Returns a report with pass/fail per check."""
+def run_all_checks(
+    *,
+    fetcher: FetchFn | None = None,
+    skip_network: bool = False,
+) -> PreFlightReport:
+    """Run all pre-flight checks. Returns a report with pass/fail per check.
+
+    Parameters
+    ----------
+    fetcher:
+        Injectable HTTP fetcher for NIM connectivity (see
+        ``check_nim_connectivity``).  ``None`` uses the real network.
+    skip_network:
+        When ``True``, skip the network-dependent NIM connectivity check and
+        record it as a non-fatal informational result.  Used for offline
+        dry-runs where no endpoint is reachable.
+    """
     report = PreFlightReport()
     t0 = time.monotonic()
 
-    check_nim_connectivity(report)
+    if skip_network:
+        report.add(
+            "NIM connectivity",
+            True,
+            "skipped (offline dry-run) — real run will verify against NIM endpoint",
+        )
+    else:
+        check_nim_connectivity(report, fetcher=fetcher)
     check_nim_rpm(report)
     check_python_env(report)
     check_docker(report)
@@ -259,10 +364,11 @@ def main() -> int:
     parser.add_argument("--check-nim", action="store_true", help="Check NIM connectivity only")
     parser.add_argument("--check-docker", action="store_true", help="Check Docker only")
     parser.add_argument("--check-disk", action="store_true", help="Check disk space only")
+    parser.add_argument("--dry-run", action="store_true", help="Skip network checks (offline)")
     parser.add_argument("--quiet", action="store_true", help="Exit code only, no output")
     args = parser.parse_args()
 
-    report = run_all_checks()
+    report = run_all_checks(skip_network=args.dry_run)
 
     if args.quiet:
         return 0 if report.all_passed else 1

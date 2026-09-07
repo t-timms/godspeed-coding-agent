@@ -26,7 +26,10 @@ def _run_doctor(
     monkeypatch.setattr(cli, "_is_ollama_running", lambda: ollama_running)
 
     if env_vars is not None:
-        monkeypatch.setattr(os, "environ", env_vars)
+        # Overlay test keys on the real environment: replacing os.environ
+        # wholesale drops USERPROFILE, and any Path.home() on the doctor's
+        # call path then raises "Could not determine home directory."
+        monkeypatch.setattr(os, "environ", {**os.environ, **env_vars})
 
     if audit_writable:
         monkeypatch.setattr(cli, "DEFAULT_GLOBAL_DIR", tmp_path / ".godspeed")
