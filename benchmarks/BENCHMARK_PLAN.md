@@ -19,6 +19,20 @@
 | 1 | **SWE-bench Verified** | 500 | Agent (bug-fix) | 65%+ (mini-swe-agent v2) | 50%+ |
 | 2 | **SWE-bench Lite** | 300 | Agent (bug-fix) | 62.7% (Claude Opus 4.6) | 50%+ |
 | 3 | **Aider Polyglot** | 225 | Multi-lang edit | 88.0% (gpt-5 high) | 65%+ |
+| 4 | **Terminal-Bench 2.1** | 89 | Terminal (operational) | 84.6% (public leaderboard) | 50%+ |
+
+> **SWE-bench status (2026-02-23):** OpenAI retired **SWE-bench Verified** after an
+> audit found 59.4% of audited hard-task test suites flawed plus training-data
+> contamination. **SWE-bench Pro** (proprietary-repo based) is the
+> contamination-resistant reference — frontier sits at 23–59% there vs ~75% on
+> Verified, the honest residual. Verified/Lite targets above are **baseline-only**
+> (historical comparison); report Pro numbers going forward.
+>
+> **Terminal-Bench (2.0/2.1):** 89 human-validated containerized terminal tasks,
+> 5 attempts each, run via the Harbor framework. Measures operational
+> reliability — the ability to drive a real shell to a correct end state, not
+> just emit a patch. Harness variance is real: the same model scored 58.0% →
+> 74.7% purely by harness change on TB 2.0. Baseline source: public leaderboard.
 
 ### Secondary
 
@@ -80,6 +94,17 @@ If switching to DeepSeek direct: ~$165 for all benchmarks.
 | Disk full (repo clones) | Run stops | Instance-level temp dirs deleted immediately after use |
 | Network blip (transient) | Instance fails | LLMClient retry with backoff, key rotation retry |
 | Power loss / system crash | Full run lost | Checkpoint JSONL, resume from last completed instance |
+
+### Reliability gates
+
+- **pass^k in `test_runner`:** the `test_runner` tool accepts a `repeat` param
+  (1–5, clamped). With `repeat=k`, the same test command runs up to k times and
+  the verdict is PASS only if **all** k runs pass (k-of-k), stopping early on the
+  first failure. Counters flaky-test reward hacking — a test that passes 1-in-3
+  times no longer counts as green.
+- **Read-only test dirs:** protect test fixtures from agent edits via FileWrite
+  deny rules in `settings.yaml` (see `settings.yaml.example`, e.g.
+  `FileWrite(tests/*)`), so the agent cannot "fix" a failing test to make it pass.
 
 ### Per-instance safety net
 
