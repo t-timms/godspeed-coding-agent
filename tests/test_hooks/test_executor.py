@@ -196,16 +196,25 @@ class TestFireMethod:
         executor.fire(HookEvent.PERMISSION_DENIED, tool="shell", pattern="dangerous")
         assert marker.exists()
 
-    def test_fire_permission_granted(self, tmp_path: Path) -> None:
-        """Test firing permission_granted event."""
-        marker = tmp_path / "permission_granted.txt"
+    def test_fire_notification(self, tmp_path: Path) -> None:
+        marker = tmp_path / "notification.txt"
         hook = HookDefinition(
-            event="permission_granted",
-            command=_py_cmd(f"open(r'{marker}', 'w').write('granted')"),
+            event="notification",
+            command=_py_cmd(f"open(r'{marker}', 'w').write('notified')"),
         )
         executor = _make_executor([hook], tmp_path)
-        executor.fire(HookEvent.PERMISSION_GRANTED, tool="file_read")
-        assert marker.exists()
+        executor.fire(HookEvent.NOTIFICATION, message="hello")
+        assert marker.read_text() == "notified"
+
+    def test_fire_stop(self, tmp_path: Path) -> None:
+        marker = tmp_path / "stop.txt"
+        hook = HookDefinition(
+            event="stop",
+            command=_py_cmd(f"open(r'{marker}', 'w').write('stopped')"),
+        )
+        executor = _make_executor([hook], tmp_path)
+        executor.fire(HookEvent.STOP)
+        assert marker.read_text() == "stopped"
 
     def test_fire_stuck_loop_detected(self, tmp_path: Path) -> None:
         """Test firing stuck_loop_detected event."""
@@ -272,23 +281,15 @@ class TestFireMethod:
         # Post events return None (advisory, don't block)
         assert result is None
 
-    def test_all_27_events_are_valid(self) -> None:
-        """Test that all 27 HookEvent values exist."""
+    def test_all_25_events_are_valid(self) -> None:
         events = [
             HookEvent.SESSION_START,
             HookEvent.SESSION_END,
-            HookEvent.TURN_END,
             HookEvent.PRE_PERMISSION_CHECK,
             HookEvent.POST_PERMISSION_CHECK,
             HookEvent.PERMISSION_DENIED,
-            HookEvent.PERMISSION_GRANTED,
             HookEvent.PRE_TOOL_CALL,
             HookEvent.POST_TOOL_CALL,
-            HookEvent.TOOL_ERROR,
-            HookEvent.TOOL_RETRY,
-            HookEvent.PRE_FILE_WRITE,
-            HookEvent.POST_FILE_WRITE,
-            HookEvent.PRE_FILE_READ,
             HookEvent.PRE_COMPACTION,
             HookEvent.POST_COMPACTION,
             HookEvent.CONTEXT_THRESHOLD_75,
@@ -296,21 +297,20 @@ class TestFireMethod:
             HookEvent.CONTEXT_THRESHOLD_25,
             HookEvent.PRE_SUBAGENT_SPAWN,
             HookEvent.POST_SUBAGENT_COMPLETE,
+            HookEvent.POST_SUBAGENT_STOP,
             HookEvent.SUBAGENT_ERROR,
-            HookEvent.PRE_EVOLUTION_RUN,
-            HookEvent.POST_EVOLUTION_RUN,
             HookEvent.SECRET_DETECTED,
             HookEvent.DANGEROUS_COMMAND,
             HookEvent.STUCK_LOOP_DETECTED,
             HookEvent.BUDGET_EXCEEDED,
-            HookEvent.AUDIT_WRITE,
-            HookEvent.POST_GRAPH_BUILD,
             HookEvent.WORKFLOW_PHASE_COMPLETE,
             HookEvent.WORKFLOW_COMPLETE,
             HookEvent.WORKFLOW_REJECTED,
+            HookEvent.STOP,
+            HookEvent.NOTIFICATION,
         ]
-        # Should have 33 events (including the new ones)
-        assert len(events) >= 27
+        assert len(events) == 25
+        assert len(set(e.value for e in HookEvent)) == 25
 
 
 class TestNeedsShell:
