@@ -55,16 +55,13 @@ async def architect_loop(
         max_tokens=conversation.max_tokens,
     )
 
-    # Temporarily switch model for planning if different
-    original_model = llm_client.model
-    if plan_model != original_model:
-        llm_client.model = plan_model
-
-    # Run planning phase
+    # derive(), not with_model(): the swap is unsafe across awaits and
+    # mid-session model changes invalidate the provider prompt cache.
+    plan_client = llm_client.derive(plan_model)
     plan = await agent_loop(
         user_input=user_input,
         conversation=plan_conversation,
-        llm_client=llm_client,
+        llm_client=plan_client,
         tool_registry=read_only_registry,
         tool_context=tool_context,
         parallel_tool_calls=True,
@@ -82,10 +79,7 @@ async def architect_loop(
             }
         },
     )
-
-    # Restore original model
-    if plan_model != original_model:
-        llm_client.model = original_model
+    llm_client.adopt(plan_client)
 
     if not plan or plan.startswith("Error:"):
         return plan or "Error: Architect planning phase produced no output."

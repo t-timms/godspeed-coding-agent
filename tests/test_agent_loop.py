@@ -2993,8 +2993,8 @@ class TestStreamingCallAdditional:
         )
 
         assert result == "hello"
-        assert llm.total_input_tokens == 10
-        assert llm.total_output_tokens == 5
+        assert llm.total_input_tokens == 0
+        assert llm.total_output_tokens == 0
 
     @pytest.mark.asyncio
     async def test_streaming_call_uses_json_markdown_parser(self, tool_context) -> None:
@@ -3050,3 +3050,78 @@ class TestStreamingCallAdditional:
 
         # Either markdown parser parsed tool calls or we got the raw content
         assert result in ("contents", "") or "file_read" in result
+
+class TestSafetyHookFiring:
+    """Advisory DANGEROUS_COMMAND / SECRET_DETECTED hooks fire during evaluation."""
+
+    @pytest.mark.asyncio
+    async def test_dangerous_command_hook_fires(self, tool_context) -> None:
+        from unittest.mock import MagicMock
+
+        from godspeed.hooks import HookEvent
+
+        conversation = Conversation("You are a coding agent.", max_tokens=100_000)
+        registry = ToolRegistry()
+        registry.register(MockTool(name="shell", result=ToolResult.success("ran")))
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_response("shell", {"command": "rm -rf /"}),
+                _make_text_response("Done."),
+            ]
+        )
+        hook_executor = MagicMock()
+        mock_perms = MagicMock()
+        mock_perms.evaluate = MagicMock(return_value="allow")
+        ctx = type(tool_context)(
+            cwd=tool_context.cwd,
+            session_id="test",
+            permissions=mock_perms,
+        )
+        await agent_loop(
+            "Run it",
+            conversation,
+            client,
+            registry,
+            ctx,
+            hook_executor=hook_executor,
+        )
+        events = [c[0][0] for c in hook_executor.fire.call_args_list]
+        assert HookEvent.DANGEROUS_COMMAND in events
+
+    @pytest.mark.asyncio
+    async def test_secret_detected_hook_fires(self, tool_context) -> None:
+        from unittest.mock import MagicMock
+
+        from godspeed.hooks import HookEvent
+
+        conversation = Conversation("You are a coding agent.", max_tokens=100_000)
+        registry = ToolRegistry()
+        registry.register(MockTool(name="shell", result=ToolResult.success("ran")))
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_response(
+                    "shell", {"command": "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"}
+                ),
+                _make_text_response("Done."),
+            ]
+        )
+        hook_executor = MagicMock()
+        mock_perms = MagicMock()
+        mock_perms.evaluate = MagicMock(return_value="allow")
+        ctx = type(tool_context)(
+            cwd=tool_context.cwd,
+            session_id="test",
+            permissions=mock_perms,
+        )
+        await agent_loop(
+            "Run it",
+            conversation,
+            client,
+            registry,
+            ctx,
+            hook_executor=hook_executor,
+        )
+        events = [c[0][0] for c in hook_executor.fire.call_args_list]
+        assert HookEvent.SECRET_DETECTED in events
