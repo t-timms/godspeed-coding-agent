@@ -1,4 +1,4 @@
-﻿"""Tests for the hook dispatcher (auto-approve/deny, adapters)."""
+"""Tests for the hook dispatcher (auto-approve/deny, adapters)."""
 
 from __future__ import annotations
 

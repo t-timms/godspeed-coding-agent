@@ -1,4 +1,4 @@
-﻿"""Hook dispatcher — orchestrates hook execution with auto-approve/deny.
+"""Hook dispatcher — orchestrates hook execution with auto-approve/deny.
 
 Higher-level layer over ``HookExecutor`` that adds:
 
