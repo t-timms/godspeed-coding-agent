@@ -7,6 +7,9 @@ leakage.
 
 from __future__ import annotations
 
+import hashlib
+import math
+import random
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -16,7 +19,9 @@ from godspeed.agent.loop import _META_COMMENTARY_PATTERNS
 
 __all__ = [
     "DEFAULT_EVAL_CASES",
+    "DEFAULT_EVAL_DATASET",
     "EvalCase",
+    "EvalDataset",
     "EvalResult",
     "EvalSummary",
     "PromptEvaluator",
@@ -70,6 +75,55 @@ class EvalSummary:
     meta_commentary_leaks: int = 0
     avg_latency_ms: float = 0.0
     by_tag: dict[str, EvalSummary] = field(default_factory=dict)
+    dataset_version: str = ""
+    split_label: str = ""
+
+
+@dataclass(frozen=True)
+class EvalDataset:
+    """A versioned collection of eval cases.
+
+    Version pinning: an explicit *version* wins; otherwise a content hash
+    (first 8 hex of sha256 over the canonical case list) identifies the
+    exact case set, so reported results are reproducible and comparable
+    across runs. Pair with :meth:`stratified_split` to keep held-out test
+    cases out of prompt-iteration loops.
+    """
+
+    name: str
+    cases: tuple[EvalCase, ...]
+    version: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.version:
+            object.__setattr__(self, "version", f"auto-{self.content_hash[:8]}")
+
+    @property
+    def content_hash(self) -> str:
+        """Stable hash over the case set (prompt, label, tags)."""
+        payload = "\n".join(f"{c.user_prompt}|{c.expected}|{','.join(c.tags)}" for c in self.cases)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+    def stratified_split(
+        self,
+        test_ratio: float = 0.2,
+        seed: int = 39,
+    ) -> tuple[tuple[EvalCase, ...], tuple[EvalCase, ...]]:
+        """Deterministic train/test split, stratified by expected label.
+
+        Same dataset + seed → same split every time, so held-out cases stay
+        held out across prompt iterations (contamination hygiene).
+        """
+        rng = random.Random(seed)  # noqa: S311 - determinism is the point
+        train: list[EvalCase] = []
+        test: list[EvalCase] = []
+        for label in ("text", "tool_call"):
+            group = [c for c in self.cases if c.expected == label]
+            rng.shuffle(group)
+            n_test = math.ceil(len(group) * test_ratio)
+            test.extend(group[:n_test])
+            train.extend(group[n_test:])
+        return tuple(train), tuple(test)
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +289,5 @@ DEFAULT_EVAL_CASES: list[EvalCase] = [
         ("adversarial", "chat"),
     ),
 ]
+
+DEFAULT_EVAL_DATASET = EvalDataset(name="prompt", cases=tuple(DEFAULT_EVAL_CASES))

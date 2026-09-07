@@ -113,6 +113,8 @@ class ConversationLogger:
         duration_seconds: float,
         cost_usd: float,
         must_fix_injections: int = 0,
+        lines_added: int | None = None,
+        lines_removed: int | None = None,
     ) -> None:
         """Terminal record per session.
 
@@ -125,19 +127,22 @@ class ConversationLogger:
         triggered many fix-required injections are less efficient per unit
         of successful work.
         """
-        self._write(
-            {
-                "role": "session_end",
-                "exit_reason": exit_reason,
-                "exit_code": exit_code,
-                "iterations_used": iterations_used,
-                "tool_call_count": tool_call_count,
-                "tool_error_count": tool_error_count,
-                "must_fix_injections": must_fix_injections,
-                "duration_seconds": round(duration_seconds, 3),
-                "cost_usd": round(cost_usd, 6),
-            }
-        )
+        record = {
+            "role": "session_end",
+            "exit_reason": exit_reason,
+            "exit_code": exit_code,
+            "iterations_used": iterations_used,
+            "tool_call_count": tool_call_count,
+            "tool_error_count": tool_error_count,
+            "must_fix_injections": must_fix_injections,
+            "duration_seconds": round(duration_seconds, 3),
+            "cost_usd": round(cost_usd, 6),
+        }
+        if lines_added is not None:
+            record["lines_added"] = lines_added
+        if lines_removed is not None:
+            record["lines_removed"] = lines_removed
+        self._write(record)
 
     def close(self) -> None:
         """Flush and close the underlying file."""

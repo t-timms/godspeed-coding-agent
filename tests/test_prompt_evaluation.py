@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from godspeed.evaluation.prompt_eval import (
     DEFAULT_EVAL_CASES,
+    DEFAULT_EVAL_DATASET,
     EvalCase,
+    EvalDataset,
     EvalResult,
     PromptEvaluator,
     _build_summary,
@@ -176,3 +178,55 @@ def test_default_cases_have_descriptions() -> None:
 def test_default_cases_have_tags() -> None:
     for case in DEFAULT_EVAL_CASES:
         assert case.tags, f"Case {case.user_prompt!r} lacks tags"
+
+
+# ---------------------------------------------------------------------------
+# EvalDataset: versioning + deterministic splits
+# ---------------------------------------------------------------------------
+
+
+class TestEvalDataset:
+    def _dataset(self, n_text: int = 8, n_tool: int = 4) -> EvalDataset:
+        cases = [
+            EvalCase(f"text prompt {i}", "text", f"t{i}", ("chat",)) for i in range(n_text)
+        ] + [EvalCase(f"tool prompt {i}", "tool_call", f"c{i}", ("coding",)) for i in range(n_tool)]
+        return EvalDataset(name="unit", cases=tuple(cases))
+
+    def test_auto_version_from_content_hash(self) -> None:
+        ds = self._dataset()
+        assert ds.version.startswith("auto-")
+        assert ds.version == f"auto-{ds.content_hash[:8]}"
+
+    def test_explicit_version_wins(self) -> None:
+        ds = EvalDataset(name="unit", cases=(EvalCase("x", "text", "", ()),), version="v7")
+        assert ds.version == "v7"
+
+    def test_content_hash_changes_with_cases(self) -> None:
+        a = self._dataset(n_text=8)
+        b = self._dataset(n_text=9)
+        assert a.content_hash != b.content_hash
+
+    def test_split_is_deterministic(self) -> None:
+        ds = self._dataset()
+        train1, test1 = ds.stratified_split(seed=39)
+        train2, test2 = ds.stratified_split(seed=39)
+        assert train1 == train2
+        assert test1 == test2
+
+    def test_split_is_stratified(self) -> None:
+        ds = self._dataset(n_text=10, n_tool=5)
+        train, test = ds.stratified_split(test_ratio=0.2, seed=39)
+        assert all(c.expected == "text" for c in train if c.expected == "text")
+        assert sum(1 for c in test if c.expected == "text") >= 1
+        assert sum(1 for c in test if c.expected == "tool_call") >= 1
+
+    def test_split_sizes_and_disjointness(self) -> None:
+        ds = self._dataset(n_text=10, n_tool=5)
+        train, test = ds.stratified_split(test_ratio=0.2, seed=39)
+        assert len(train) + len(test) == len(ds.cases)
+        assert set(c.user_prompt for c in train).isdisjoint(set(c.user_prompt for c in test))
+        assert len(test) == 3  # ceil(10*.2)=2 text + ceil(5*.2)=1 tool
+
+    def test_default_dataset_versioned(self) -> None:
+        assert DEFAULT_EVAL_DATASET.cases == tuple(DEFAULT_EVAL_CASES)
+        assert DEFAULT_EVAL_DATASET.version.startswith("auto-")
