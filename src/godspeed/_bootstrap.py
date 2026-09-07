@@ -10,7 +10,7 @@ import logging
 import os
 from pathlib import Path
 
-from godspeed.config import DEFAULT_GLOBAL_DIR
+from godspeed.config import DEFAULT_GLOBAL_DIR, GodspeedSettings
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +85,10 @@ def _load_env_files(project_dir: Path | None = None) -> list[tuple[Path, list[st
     return loaded
 
 
-def _build_tool_registry(tool_set: str = "full") -> tuple:
+def _build_tool_registry(
+    tool_set: str = "full",
+    settings: GodspeedSettings | None = None,
+) -> tuple:
     from godspeed.tools.tool_sets import get_allowed_tool_names
 
     allowed = get_allowed_tool_names(tool_set)
@@ -96,7 +99,16 @@ def _build_tool_registry(tool_set: str = "full") -> tuple:
     from godspeed.tools.file_write import FileWriteTool
     from godspeed.tools.registry import ToolRegistry
 
-    registry = ToolRegistry()
+    sandbox = None
+    if settings is not None:
+        from godspeed.sandbox.policy import build_sandbox_policy
+
+        sandbox = build_sandbox_policy(
+            blocked_paths=settings.sandbox_settings.blocked_paths or None,
+            writable_paths=settings.sandbox_settings.writable_paths or None,
+        )
+
+    registry = ToolRegistry(sandbox=sandbox)
     risk_levels: dict[str, RiskLevel] = {}
 
     from godspeed.tools.background import BackgroundCheckTool
