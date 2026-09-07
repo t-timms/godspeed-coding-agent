@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import shlex
 import subprocess
-import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,12 +16,26 @@ from godspeed.hooks.config import HookDefinition
 logger = logging.getLogger(__name__)
 
 _SHELL_META = set("|<>;&")
-"""Characters that require shell=True on any platform."""
 
 
 def _needs_shell(command: str) -> bool:
     """Check if a command contains shell metacharacters that require shell=True."""
     return any(ch in command for ch in _SHELL_META)
+
+
+_SHELL_UNSAFE_RE = re.compile(r"[;|<>&`\$!#*?{}()\[\]\\\"' \t\n]")
+
+
+def _sanitize_template_var(value: str) -> str:
+    """Escape shell-unsafe characters in a template variable value.
+
+    Prevents injection via user-controlled values (tool_name, paths, etc.)
+    being interpolated into hook commands.  Only characters that could be
+    interpreted by a shell are escaped; cosmetic characters are preserved.
+    """
+    if not value:
+        return value
+    return _SHELL_UNSAFE_RE.sub(lambda m: "\\" + m.group(0), value)
 
 
 class HookExecutor:
@@ -117,12 +131,13 @@ class HookExecutor:
 
         Returns the exit code (0 = success).
         """
-        template_vars = {
+        raw_vars: dict[str, str] = {
             "session_id": self._session_id,
             "cwd": str(self._cwd),
             "project_dir": str(self._cwd),
             **{k: str(v) for k, v in context.items()},
         }
+        template_vars = {k: _sanitize_template_var(v) for k, v in raw_vars.items()}
 
         try:
             command = hook.command.format(**template_vars)
@@ -141,9 +156,10 @@ class HookExecutor:
             hook.timeout,
         )
 
+        use_shell = _needs_shell(command)
         try:
-            if sys.platform == "win32":
-                result = subprocess.run(  # noqa: S602
+            if use_shell:
+                result = subprocess.run(  # noqa: S602 # nosec B602 - trusted hook config, template vars sanitized
                     command,
                     shell=True,
                     cwd=self._cwd,

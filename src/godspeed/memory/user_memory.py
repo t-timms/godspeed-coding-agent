@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA_VERSION = 1
 
+_MAX_PREF_VALUE_CHARS = 4000
+_MAX_CORRECTIONS = 500
+_MAX_CORRECTION_CHARS = 2000
+
 _INIT_SQL = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -104,6 +108,10 @@ class UserMemory:
 
     def set(self, key: str, value: str) -> None:
         """Set a preference value (upsert)."""
+        from godspeed.memory.redact import redact_or_fail
+
+        key = redact_or_fail(key)
+        value = redact_or_fail(value)[:_MAX_PREF_VALUE_CHARS]
         conn = self._get_conn()
         now = time.time()
         conn.execute(
@@ -132,6 +140,11 @@ class UserMemory:
 
     def record_correction(self, original: str, corrected: str, context: str = "") -> int:
         """Record a user correction. Returns the correction ID."""
+        from godspeed.memory.redact import redact_or_fail
+
+        original = redact_or_fail(original)[:_MAX_CORRECTION_CHARS]
+        corrected = redact_or_fail(corrected)[:_MAX_CORRECTION_CHARS]
+        context = redact_or_fail(context)[:_MAX_CORRECTION_CHARS]
         conn = self._get_conn()
         now = time.time()
         cursor = conn.execute(
@@ -147,6 +160,7 @@ class UserMemory:
             original[:50],
             corrected[:50],
         )
+        self.cleanup_old_entries()
         return correction_id  # type: ignore[return-value]
 
     def get_corrections(self, limit: int = 10) -> list[dict[str, Any]]:
@@ -172,3 +186,26 @@ class UserMemory:
         cursor = conn.execute("SELECT COUNT(*) FROM corrections")
         row = cursor.fetchone()
         return row[0] if row else 0
+
+    def cleanup_old_entries(self, max_corrections: int = _MAX_CORRECTIONS) -> int:
+        """Prune oldest corrections beyond the cap. Returns count deleted."""
+        conn = self._get_conn()
+        cursor = conn.execute("SELECT COUNT(*) AS cnt FROM corrections")
+        cnt = cursor.fetchone()
+        if cnt is None or cnt["cnt"] <= max_corrections:
+            return 0
+        excess = cnt["cnt"] - max_corrections
+        rows = conn.execute(
+            "SELECT id FROM corrections ORDER BY created_at ASC LIMIT ?",
+            (excess,),
+        ).fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        del_cursor = conn.execute(
+            f"DELETE FROM corrections WHERE id IN ({placeholders})",  # noqa: S608
+            ids,
+        )
+        conn.commit()
+        return del_cursor.rowcount

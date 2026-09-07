@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_TIMEOUT = 30.0
 
 
 class MCPServerConfig:
@@ -76,6 +79,7 @@ class MCPClient:
 
     def __init__(self) -> None:
         self._connections: dict[str, Any] = {}
+        self._stdio_transports: dict[str, Any] = {}
         self._sse_clients: dict[str, Any] = {}
         self._stdio_available = self._check_stdio_available()
         self._sse_available = self._check_sse_available()
@@ -114,17 +118,32 @@ class MCPClient:
         """
         return self._stdio_available or self._sse_available
 
-    async def connect(self, config: MCPServerConfig) -> list[MCPToolDefinition]:
+    async def connect(
+        self,
+        config: MCPServerConfig,
+        *,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> list[MCPToolDefinition]:
         """Connect to an MCP server and discover its tools.
 
         Returns a list of tool definitions provided by the server.
         Supports both stdio and SSE transports based on config.transport.
+
+        Args:
+            config: Server configuration (transport, command/url, etc.).
+            timeout: Seconds to wait for initialize / list_tools before
+                raising ``asyncio.TimeoutError``.  Default 30.
         """
         if config.transport == "sse":
-            return await self._connect_sse(config)
-        return await self._connect_stdio(config)
+            return await self._connect_sse(config, timeout=timeout)
+        return await self._connect_stdio(config, timeout=timeout)
 
-    async def _connect_sse(self, config: MCPServerConfig) -> list[MCPToolDefinition]:
+    async def _connect_sse(
+        self,
+        config: MCPServerConfig,
+        *,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> list[MCPToolDefinition]:
         """Connect to a remote MCP server via SSE/HTTP transport."""
         if not self._sse_available:
             logger.warning("httpx not installed — skipping SSE server %s", config.name)
@@ -138,10 +157,10 @@ class MCPClient:
             from godspeed.mcp.sse_transport import MCPSSEClient
 
             client = MCPSSEClient(base_url=config.url, headers=config.headers)
-            await client.connect()
+            await asyncio.wait_for(client.connect(), timeout=timeout)
             self._sse_clients[config.name] = client
 
-            raw_tools = await client.list_tools()
+            raw_tools = await asyncio.wait_for(client.list_tools(), timeout=timeout)
             definitions: list[MCPToolDefinition] = []
             for tool in raw_tools:
                 defn = MCPToolDefinition(
@@ -163,12 +182,23 @@ class MCPClient:
             logger.error("MCP SSE connection failed server=%s error=%s", config.name, exc)
             return []
 
-    async def _connect_stdio(self, config: MCPServerConfig) -> list[MCPToolDefinition]:
-        """Connect to a local MCP server via stdio transport."""
+    async def _connect_stdio(
+        self,
+        config: MCPServerConfig,
+        *,
+        timeout: float = _DEFAULT_TIMEOUT,
+    ) -> list[MCPToolDefinition]:
+        """Connect to a local MCP server via stdio transport.
+
+        Context managers entered on the success path are always exited
+        on failure via ``__aexit__``.
+        """
         if not self._stdio_available:
             logger.warning("MCP package not installed — skipping server %s", config.name)
             return []
 
+        stdio_cm = None
+        session_cm = None
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
@@ -179,36 +209,49 @@ class MCPClient:
                 env=config.env if config.env else None,
             )
 
-            async with (
-                stdio_client(params) as (read_stream, write_stream),
-                ClientSession(read_stream, write_stream) as session,
-            ):
-                await session.initialize()
+            stdio_cm = stdio_client(params)
+            read_stream, write_stream = await stdio_cm.__aenter__()
 
-                # Store session reference for later calls
-                self._connections[config.name] = session
+            session_cm = ClientSession(read_stream, write_stream)
+            session = await session_cm.__aenter__()
 
-                # Discover tools
-                tools_response = await session.list_tools()
-                definitions = []
-                for tool in tools_response.tools:
-                    defn = MCPToolDefinition(
-                        name=f"mcp_{config.name}_{tool.name}",
-                        description=tool.description or f"MCP tool: {tool.name}",
-                        input_schema=(tool.inputSchema if hasattr(tool, "inputSchema") else {}),
-                        server_name=config.name,
-                    )
-                    definitions.append(defn)
+            await asyncio.wait_for(session.initialize(), timeout=timeout)
 
-                logger.info(
-                    "MCP connected server=%s tools=%d",
-                    config.name,
-                    len(definitions),
+            self._connections[config.name] = session
+            self._stdio_transports[config.name] = (stdio_cm, session_cm)
+
+            tools_response = await asyncio.wait_for(session.list_tools(), timeout=timeout)
+            definitions = []
+            for tool in tools_response.tools:
+                defn = MCPToolDefinition(
+                    name=f"mcp_{config.name}_{tool.name}",
+                    description=tool.description or f"MCP tool: {tool.name}",
+                    input_schema=(tool.inputSchema if hasattr(tool, "inputSchema") else {}),
+                    server_name=config.name,
                 )
-                return definitions
+                definitions.append(defn)
+
+            logger.info(
+                "MCP connected server=%s tools=%d",
+                config.name,
+                len(definitions),
+            )
+            return definitions
 
         except Exception as exc:
             logger.error("MCP connection failed server=%s error=%s", config.name, exc)
+            self._connections.pop(config.name, None)
+            self._stdio_transports.pop(config.name, None)
+            if session_cm is not None:
+                try:
+                    await session_cm.__aexit__(type(exc), exc, None)
+                except Exception:
+                    logger.debug("MCP session_cm __aexit__ error", exc_info=True)
+            if stdio_cm is not None:
+                try:
+                    await stdio_cm.__aexit__(type(exc), exc, None)
+                except Exception:
+                    logger.debug("MCP stdio_cm __aexit__ error", exc_info=True)
             return []
 
     async def call_tool(
@@ -216,6 +259,8 @@ class MCPClient:
         server_name: str,
         tool_name: str,
         arguments: dict[str, Any],
+        *,
+        timeout: float = _DEFAULT_TIMEOUT,
     ) -> str:
         """Call a tool on a connected MCP server.
 
@@ -223,23 +268,25 @@ class MCPClient:
             server_name: Name of the MCP server.
             tool_name: Original tool name (without mcp_ prefix).
             arguments: Tool arguments.
+            timeout: Seconds to wait for the tool call.  Default 30.
 
         Returns:
             The tool result as a string.
         """
-        # Check SSE clients first
         sse_client = self._sse_clients.get(server_name)
         if sse_client is not None:
-            return await sse_client.call_tool(tool_name, arguments)
+            return await asyncio.wait_for(
+                sse_client.call_tool(tool_name, arguments), timeout=timeout
+            )
 
-        # Fall back to stdio session
         session = self._connections.get(server_name)
         if session is None:
             return f"Error: MCP server '{server_name}' is not connected"
 
         try:
-            result = await session.call_tool(tool_name, arguments)
-            # Extract text content from result
+            result = await asyncio.wait_for(
+                session.call_tool(tool_name, arguments), timeout=timeout
+            )
             if hasattr(result, "content"):
                 parts = []
                 for item in result.content:
@@ -247,6 +294,13 @@ class MCPClient:
                         parts.append(item.text)
                 return "\n".join(parts) if parts else str(result)
             return str(result)
+        except TimeoutError:
+            logger.error(
+                "MCP tool call timed out server=%s tool=%s",
+                server_name,
+                tool_name,
+            )
+            return f"Error: MCP tool call timed out — {server_name}/{tool_name}"
         except Exception as exc:
             logger.error(
                 "MCP tool call failed server=%s tool=%s error=%s",
@@ -264,4 +318,15 @@ class MCPClient:
             except Exception as exc:
                 logger.error("MCP SSE disconnect error: %s", exc)
         self._sse_clients.clear()
+
+        for name, (stdio_cm, session_cm) in self._stdio_transports.items():
+            try:
+                await session_cm.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.error("MCP stdio session disconnect error server=%s: %s", name, exc)
+            try:
+                await stdio_cm.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.error("MCP stdio transport disconnect error server=%s: %s", name, exc)
+        self._stdio_transports.clear()
         self._connections.clear()

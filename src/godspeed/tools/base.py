@@ -10,6 +10,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from godspeed.sandbox.policy_types import SandboxPolicy
+
 
 class RiskLevel(StrEnum):
     """4-tier risk classification for tools.
@@ -160,6 +162,9 @@ class DiffReviewer(Protocol):
         pass
 
 
+WEB_CALL_SESSION_CAP = 200
+
+
 class ToolContext(BaseModel):
     """Execution context passed to every tool."""
 
@@ -169,6 +174,10 @@ class ToolContext(BaseModel):
     audit: AuditRecorder | None = None
     llm_client: LLMInvoker | None = None
     diff_reviewer: DiffReviewer | None = None
+    sandbox: SandboxPolicy | None = None
+    web_call_count: int = 0
+    lines_added: int = 0
+    lines_removed: int = 0
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -204,6 +213,17 @@ class Tool(abc.ABC):
     def risk_level(self) -> RiskLevel:
         """Risk classification determining default permission behavior."""
         pass
+
+    @property
+    def concurrency_safe(self) -> bool:
+        """Whether this tool may run concurrently with other safe tools.
+
+        Drives loop batching: consecutive concurrency-safe calls execute in
+        one gathered batch (bounded by a semaphore); the first non-safe call
+        forces a serial flush. Defaults to READ_ONLY; override for tools
+        whose reads are safe despite a higher declared risk level.
+        """
+        return self.risk_level == RiskLevel.READ_ONLY
 
     @abc.abstractmethod
     def get_schema(self) -> dict[str, Any]:

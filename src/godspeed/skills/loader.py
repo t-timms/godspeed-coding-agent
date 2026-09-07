@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 
 SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
+SKILL_DESCRIPTION_MAX_CHARS = 250
+SKILL_CONTEXT_BUDGET_FRACTION = 0.01
+_CHARS_PER_TOKEN = 4
+
 DEFAULT_SKILL_DIRS: list[Path] = [
     Path.home() / ".config" / "opencode" / "skills",
     Path.home() / ".claude" / "skills",
@@ -173,6 +177,15 @@ def _load_skill_directory(skill_dir: Path) -> Skill | None:
         logger.warning("Skill %s has invalid name %r", skill_path, name)
         return None
 
+    if len(description) > SKILL_DESCRIPTION_MAX_CHARS:
+        logger.warning(
+            "Skill %s description %d chars exceeds %d — truncating",
+            skill_path,
+            len(description),
+            SKILL_DESCRIPTION_MAX_CHARS,
+        )
+        description = description[:SKILL_DESCRIPTION_MAX_CHARS].rstrip() + "..."
+
     if skill_dir.name != name:
         logger.warning("Skill dir %s != name %s — using dir name", skill_dir.name, name)
 
@@ -258,6 +271,33 @@ def discover_skills(extra_dirs: list[Path] | None = None) -> list[Skill]:
     result = list(seen.values())
     logger.info("Discovered %d skills from %d directories", len(result), len(dirs))
     return result
+
+
+def filter_context_budget(
+    skills: list[Skill],
+    context_window_tokens: int = 200_000,
+) -> list[Skill]:
+    """Drop skills whose body would exceed the per-skill context budget.
+
+    A skill's full SKILL.md body enters the context on activation; a body
+    larger than ``SKILL_CONTEXT_BUDGET_FRACTION`` (1%) of the context window
+    would dominate the conversation the moment it fires. Oversized skills are
+    refused at discovery (fail closed) rather than truncated mid-content,
+    which would produce misleading partial instructions.
+    """
+    max_chars = int(context_window_tokens * SKILL_CONTEXT_BUDGET_FRACTION) * _CHARS_PER_TOKEN
+    kept: list[Skill] = []
+    for skill in skills:
+        if len(skill.content) > max_chars:
+            logger.warning(
+                "Skill %s body %d chars exceeds 1%% context budget (%d) — refusing",
+                skill.name,
+                len(skill.content),
+                max_chars,
+            )
+            continue
+        kept.append(skill)
+    return kept
 
 
 class SkillHub:

@@ -34,6 +34,17 @@ class TestConversationLogger:
         clog.log_user("hello")
         assert clog.path.exists()
 
+    def test_tool_result_secrets_are_redacted(self, clog: ConversationLogger) -> None:
+        clog.log_tool_result(
+            "call_1",
+            "file_read",
+            'aws_key = "AKIAIOSFODNN7EXAMPLE"',  # canonical AWS docs example
+        )
+        records = _read_lines(clog, clog.path)
+        raw = clog.path.read_text()
+        assert "AKIAIOSFODNN7EXAMPLE" not in raw
+        assert "[REDACTED" in records[0]["content"]
+
     def test_log_system(self, clog: ConversationLogger) -> None:
         clog.log_system("You are Godspeed.")
         records = _read_lines(clog, clog.path)

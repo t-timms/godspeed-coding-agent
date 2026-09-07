@@ -17,24 +17,25 @@ class TestPromptCaching:
             {"role": "user", "content": "Second question"},
         ]
         result = LLMClient._apply_prompt_caching("claude-sonnet-4-20250514", messages)
-        # First 2 messages should get cache_control (4 total - 2 tail = 2 cached)
-        assert isinstance(result[0]["content"], list)
-        assert result[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
-        assert isinstance(result[1]["content"], list)
-        assert result[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
-        # Last 2 messages should be unchanged
-        assert result[2]["content"] == "First answer"
+        # system_and_3: up to 3 breakpoints on the last stable messages.
+        # 4 total - 1 newest = 3 cached (indices 0, 1, 2)
+        for i in range(3):
+            assert isinstance(result[i]["content"], list)
+            assert result[i]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # Newest message is never cached (changes every turn)
         assert result[3]["content"] == "Second question"
 
     def test_short_conversation_no_cache_for_claude(self) -> None:
-        """With <= 2 messages, nothing gets cached (no stable prefix)."""
+        """With 2 messages, only the stable system prefix gets a breakpoint."""
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello"},
         ]
         result = LLMClient._apply_prompt_caching("claude-sonnet-4-20250514", messages)
-        # Both should be unchanged (num_to_cache = 0)
-        assert result[0]["content"] == "You are a helpful assistant."
+        # System message (stable prefix) gets the single breakpoint
+        assert isinstance(result[0]["content"], list)
+        assert result[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+        # Newest message unchanged
         assert result[1]["content"] == "Hello"
 
     def test_no_cache_for_openai(self) -> None:
@@ -69,10 +70,12 @@ class TestPromptCaching:
             {"role": "assistant", "content": "Response"},
         ]
         result = LLMClient._apply_prompt_caching("claude-sonnet-4-20250514", messages)
-        # Only system gets cache_control (3 total - 2 tail = 1 cached)
+        # system_and_3: 3 total - 1 newest = 2 cached (system + user)
         assert isinstance(result[0]["content"], list)
         assert "cache_control" in result[0]["content"][0]
-        assert result[1] == messages[1]
+        assert isinstance(result[1]["content"], list)
+        assert "cache_control" in result[1]["content"][0]
+        # Newest message unchanged
         assert result[2] == messages[2]
 
     def test_handles_already_structured_content(self) -> None:

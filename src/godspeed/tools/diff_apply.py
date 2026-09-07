@@ -368,6 +368,12 @@ class DiffApplyTool(Tool):
 
         for file_diff in file_diffs:
             try:
+                if not dry_run:
+                    # Before-edit checkpoint per target file (new files have
+                    # nothing to snapshot) — keeps multi-file diffs reversible.
+                    from godspeed.tools.edit_checkpoints import snapshot_file
+
+                    snapshot_file(context.cwd / file_diff.new_path, context.cwd, context.session_id)
                 hunks_applied, fuzzy_count = apply_file_diff(
                     file_diff, context.cwd, dry_run=dry_run
                 )

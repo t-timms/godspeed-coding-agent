@@ -132,6 +132,20 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\S+\.(?:pem|p12|pfx|jks|keystore)\b", re.IGNORECASE),
         "certificate_file_path",
     ),
+    # AWS SigV4 authorization headers
+    (
+        re.compile(r"AWS4-HMAC-SHA256\s+Credential=[A-Za-z0-9/+=]+", re.IGNORECASE),
+        "aws_sigv4_header",
+    ),
+    # Secrets in URL query parameters
+    (
+        re.compile(
+            r"(?:[?&])(?:key|api_key|apikey|access_token|token|sig|signature)"
+            r"=[A-Za-z0-9_\-]{16,}",
+            re.IGNORECASE,
+        ),
+        "url_query_secret",
+    ),
 ]
 
 # Minimum entropy threshold for high-entropy string detection

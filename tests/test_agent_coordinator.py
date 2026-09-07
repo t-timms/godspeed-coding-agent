@@ -436,3 +436,35 @@ class TestSpawnRetrievalFailureTypes:
 
         result = await coordinator.spawn_retrieval("bad query")
         assert "error" in result.lower()
+
+
+class TestSpawnCapsAndStagger:
+    @pytest.mark.asyncio
+    async def test_spawn_cap_enforced(self, tool_context: ToolContext) -> None:
+
+        coord = AgentCoordinator(
+            llm_client=LLMClient(model="test"),
+            tool_registry=ToolRegistry(),
+            tool_context=tool_context,
+            max_spawns=0,
+        )
+        result = await coord.spawn("task")
+        assert "cap (0) reached" in result
+        assert coord._spawn_count == 1
+
+    @pytest.mark.asyncio
+    async def test_spawn_parallel_staggers_siblings(self, tool_context: ToolContext) -> None:
+        import time as _time
+
+        coord = AgentCoordinator(
+            llm_client=LLMClient(model="test"),
+            tool_registry=ToolRegistry(),
+            tool_context=tool_context,
+            stagger_seconds=0.05,
+        )
+        coord.spawn = AsyncMock(return_value="ok")
+        t0 = _time.monotonic()
+        results = await coord.spawn_parallel(["a", "b", "c"])
+        elapsed = _time.monotonic() - t0
+        assert results == ["ok", "ok", "ok"]
+        assert elapsed >= 0.08
