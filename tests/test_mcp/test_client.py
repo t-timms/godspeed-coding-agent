@@ -519,3 +519,161 @@ class TestMCPClientMultipleServers:
             assert len(c1) == 1
             assert len(c2) == 1
             assert client._connections  # still holds references
+
+
+# ============================================================================
+# MCPClient: stdio CM leak protection
+# ============================================================================
+
+
+class TestMCPClientStdioLeakProtection:
+    """Verify context managers are exited when initialization fails."""
+
+    def test_initialize_failure_exits_cm(self) -> None:
+        """If session.initialize() raises, both CMs must be exited."""
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=RuntimeError("init failed"))
+
+        mock_stdlib_client = MagicMock()
+        mock_stdlib_client.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+        mock_stdlib_client.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session_cls = MagicMock()
+        mock_session_cls.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cls.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=mock_stdlib_client),
+            patch("mcp.ClientSession", return_value=mock_session_cls),
+            patch("mcp.StdioServerParameters"),
+        ):
+            client = MCPClient()
+            config = MCPServerConfig(name="broken", command="cmd")
+            result = asyncio.run(client.connect(config))
+
+            assert result == []
+            mock_stdlib_client.__aexit__.assert_awaited_once()
+            mock_session_cls.__aexit__.assert_awaited_once()
+
+    def test_list_tools_failure_exits_cm(self) -> None:
+        """If session.list_tools() raises, both CMs must be exited."""
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.list_tools = AsyncMock(side_effect=RuntimeError("list failed"))
+
+        mock_stdlib_client = MagicMock()
+        mock_stdlib_client.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+        mock_stdlib_client.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session_cls = MagicMock()
+        mock_session_cls.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cls.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=mock_stdlib_client),
+            patch("mcp.ClientSession", return_value=mock_session_cls),
+            patch("mcp.StdioServerParameters"),
+        ):
+            client = MCPClient()
+            config = MCPServerConfig(name="broken", command="cmd")
+            result = asyncio.run(client.connect(config))
+
+            assert result == []
+            mock_stdlib_client.__aexit__.assert_awaited_once()
+            mock_session_cls.__aexit__.assert_awaited_once()
+
+    def test_failure_does_not_register_connections(self) -> None:
+        """Failed init must not leave dangling entries in _connections / _stdio_transports."""
+        mock_session = MagicMock()
+        mock_session.initialize = AsyncMock(side_effect=RuntimeError("boom"))
+
+        mock_stdlib_client = MagicMock()
+        mock_stdlib_client.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+        mock_stdlib_client.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session_cls = MagicMock()
+        mock_session_cls.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cls.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=mock_stdlib_client),
+            patch("mcp.ClientSession", return_value=mock_session_cls),
+            patch("mcp.StdioServerParameters"),
+        ):
+            client = MCPClient()
+            config = MCPServerConfig(name="leaky", command="cmd")
+            asyncio.run(client.connect(config))
+
+            assert "leaky" not in client._connections
+            assert "leaky" not in client._stdio_transports
+
+
+# ============================================================================
+# MCPClient: timeout
+# ============================================================================
+
+
+class TestMCPClientTimeout:
+    """Verify asyncio.wait_for wraps critical operations."""
+
+    def test_connect_stdio_timeout(self) -> None:
+        """Slow initialize() triggers TimeoutError and CM cleanup."""
+
+        async def _slow_init() -> None:
+            await asyncio.sleep(100)
+
+        mock_session = MagicMock()
+        mock_session.initialize = _slow_init
+
+        mock_stdlib_client = MagicMock()
+        mock_stdlib_client.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+        mock_stdlib_client.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session_cls = MagicMock()
+        mock_session_cls.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_cls.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("mcp.client.stdio.stdio_client", return_value=mock_stdlib_client),
+            patch("mcp.ClientSession", return_value=mock_session_cls),
+            patch("mcp.StdioServerParameters"),
+        ):
+            client = MCPClient()
+            config = MCPServerConfig(name="slow", command="cmd")
+            result = asyncio.run(client.connect(config, timeout=0.1))
+
+            assert result == []
+            mock_stdlib_client.__aexit__.assert_awaited_once()
+            mock_session_cls.__aexit__.assert_awaited_once()
+
+    def test_call_tool_timeout(self) -> None:
+        """Slow call_tool triggers TimeoutError and returns error string."""
+
+        async def _slow_call(*_a: object, **_kw: object) -> None:
+            await asyncio.sleep(100)
+
+        client = MCPClient()
+        mock_session = MagicMock()
+        mock_session.call_tool = _slow_call
+        client._connections["slow"] = mock_session
+
+        result = asyncio.run(client.call_tool("slow", "t", {}, timeout=0.1))
+        assert "timed out" in result.lower()
+
+    def test_connect_sse_timeout(self) -> None:
+        """Slow SSE connect triggers TimeoutError and returns empty."""
+
+        async def _slow_connect() -> None:
+            await asyncio.sleep(100)
+
+        mock_sse = MagicMock()
+        mock_sse.connect = _slow_connect
+
+        def _factory(*a: object, **kw: object) -> MagicMock:
+            return mock_sse
+
+        with patch("godspeed.mcp.sse_transport.MCPSSEClient", _factory):
+            client = MCPClient()
+            config = MCPServerConfig(name="slow_sse", transport="sse", url="http://localhost:9999")
+            result = asyncio.run(client.connect(config, timeout=0.1))
+            assert result == []
