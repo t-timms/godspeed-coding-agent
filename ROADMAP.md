@@ -8,6 +8,8 @@ This roadmap describes the path from the current Alpha to a stable v1.0 release.
 
 **Goal:** Stabilize the core agent loop, security model, and developer experience. Fix known rough edges before inviting broader testing.
 
+> **Landed (feature wave):** CLI session continuity (`--continue`, `--resume <id>`, `list-sessions`), `godspeed mcp add/list/remove`, TUI commands (`/compact`, `/verify`, `/btw`, `/goal`, `/rewind`, `/batch`, `/usage`), message queueing (Ctrl+Q), bash pass-through (`!`/`!!`), esc-esc rewind picker, image attachments, plan-mode approval gate, and `statusline` HUD config.
+
 - [x] Hash-chained audit trail with fail-closed I/O
 - [x] 4-tier permission engine with dangerous-command detection
 - [x] Schema-validated tool calls with retry logic
@@ -84,4 +86,4 @@ This roadmap describes the path from the current Alpha to a stable v1.0 release.
 - **Open an Issue** for bugs or concrete proposals
 - **Comment on existing issues** with your use case — we prioritize based on real-world demand, not speculation
 
-This roadmap is a living document. Last updated: 2026-05-01.
+This roadmap is a living document. Last updated: 2026-09-06.

@@ -17,6 +17,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing version, model, and permission mode. The banner gives users
   immediate visibility into the session configuration without needing
   to run `/tools` or `/permissions`.
+- **feat(cli): session continuity** — `godspeed --continue` resumes the
+  most recent conversation and `godspeed --resume <id>` resumes a specific
+  session by ID (`src/godspeed/cli.py`). New `godspeed list-sessions`
+  command lists recent sessions (id, started, summary).
+- **feat(cli): MCP server management** — `godspeed mcp add/list/remove`
+  manages MCP servers from the CLI, supporting stdio and SSE transports
+  with `--scope user|project` and `--env` (`src/godspeed/cli.py`).
+- **feat(tui): new slash commands** — `/compact [instructions]` manually
+  compacts the conversation, `/verify [instructions]` builds/launches/probes
+  the project and prints a PASS/FAIL verdict, `/btw <question>` answers a
+  side question without touching the main conversation, `/goal [text|clear]`
+  sets/shows/clears the session goal, `/rewind` opens the rewind picker,
+  `/batch [units=N] <goal>` decomposes a task into parallel worktree units,
+  and `/usage [tools|agents]` shows a session usage breakdown
+  (`src/godspeed/tui/commands.py`).
+- **feat(tui): message queueing** — Ctrl+Q queues the current input instead
+  of submitting it; queued messages are injected between turns
+  (`src/godspeed/tui/message_queue.py`, `src/godspeed/tui/app.py`).
+- **feat(tui): bash pass-through** — input starting with `!` runs the rest
+  as a shell command directly (bypassing the LLM); `!!` runs it in the
+  background. Commands are checked against dangerous-command detection
+  (`src/godspeed/tui/bash_passthrough.py`).
+- **feat(tui): rewind picker** — pressing Escape twice opens a picker to
+  restore conversation, files, or checkpoints (`src/godspeed/tui/rewind.py`).
+- **feat(tui): image attachments** — `:img <path>` / `@image=<path>`
+  directives attach an image to the next message; Ctrl+V pastes an image
+  path from the clipboard (`src/godspeed/tui/attachments.py`).
+- **feat(security): plan-mode approval gate** — the agent exits plan mode
+  through an explicit `exit_plan_mode` tool that awaits human approval;
+  rejection feeds guidance back so the model can revise the plan
+  (`src/godspeed/security/plan_gate.py`, `src/godspeed/agent/loop.py`).
+- **feat(config): statusline HUD** — `statusline.enabled` and
+  `statusline.template` customize the per-turn HUD with `{model}`, `{tokens}`,
+  `{cost}`, and `{branch}` placeholders; the session goal renders in the HUD
+  (`src/godspeed/config.py`, `src/godspeed/tui/output.py`).
+- **feat(tools): runtime verification** — `tools/runtime_verify.py` builds,
+  launches, and probes a project, returning a PASS/FAIL verdict with evidence
+  lines.
+- **feat(agent): aside + batch** — `agent/aside.py` backs `/btw` side
+  questions; `agent/batch.py` backs `/batch` worktree decomposition.
+- **feat(observability): usage report** — `observability/usage_report.py`
+  aggregates session usage (tokens, cost, per-tool call counts from the
+  audit trail, sub-agent invocations) and backs the `/usage` command.
+  Dimensions without a measurable source are left empty rather than
+  fabricated.
+- **feat(context): LSP feedback** — `context/lsp_feedback.py` feeds language
+  server diagnostics back into the agent loop.
+- **feat(observability): usage ledger** — `llm/usage_ledger.py` records one
+  row per LLM call; `/usage` now shows real per-task-type and
+  per-subagent token/cost attribution. Sub-agent spawns tag their records
+  via `subagent_context` or a dedicated child ledger, and audit records
+  written during spawns set `is_sidechain`/`parent_session_id`.
+- **feat(tui): diff reviews** — `/code-review [--fix]`, `/security-review`
+  (deterministic secrets scan merged with LLM review), and `/simplify`
+  review the working-tree diff (`agent/review.py`). `--fix` queues an
+  agent fix pass as user guidance.
+- **feat(cli): batch headless** — `godspeed batch <goal>` runs worktree
+  batches from the CLI with `--dry-run`, `--units`, `--parallelism`, and
+  `--allow-dirty`; new `batch` settings section (`config.py`).
+- **feat(llm): reasoning effort call-time** — `reasoning_effort` is now
+  applied at call time by the LLM client; `/effort low|medium|high` sets
+  it for the session.
+- **feat(tui): /loop recurring prompt** — `/loop [interval] <prompt>`
+  re-dispatches a prompt on an interval at the turn-complete point
+  (`tui/loop_state.py`); pause-aware, `/loop stop` cancels.
+- **feat(batch): PR automation** — `/batch` and `godspeed batch --open-pr`
+  open a GitHub PR per patchable unit via `gh` when
+  `batch.open_pr`/`--open-pr` is set (`agent/batch.py` `create_pr`);
+  per-unit gh failures never abort the batch.
+- **feat(tui): /fork + persistent history** — `/fork [label]` duplicates the
+  conversation under a new resumable session id; prompt history persists
+  in `.godspeed/history` with Ctrl-R reverse search.
 
 ### Fixed
 
