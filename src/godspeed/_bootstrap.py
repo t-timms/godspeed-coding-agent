@@ -209,6 +209,14 @@ def _build_tool_registry(
     except ImportError:
         logger.debug("llamacpp_manager not available")
 
+    from godspeed.tools.acceptance import (
+        AcceptanceInitTool,
+        AcceptanceStatusTool,
+        AcceptanceUpdateTool,
+    )
+
+    tools.extend([AcceptanceInitTool(), AcceptanceUpdateTool(), AcceptanceStatusTool()])
+
     for tool in tools:
         if allowed is not None and tool.name not in allowed:
             continue
