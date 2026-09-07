@@ -6,8 +6,7 @@ Returns FileSpan list only — never raw file content.
 Max 4 turns, 8 parallel tool calls per turn.
 Budget-conscious: uses cheap_model routing for retrieval tasks.
 
-Inspired by WarpGrep (Morph) and SWE-grep (Cognition).
-Godspeed advantage: GCG-first retrieval is more precise than grep-first.
+Design advantage: GCG-first retrieval is more precise than grep-first.
 """
 
 from __future__ import annotations

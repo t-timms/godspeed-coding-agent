@@ -1,8 +1,7 @@
 """Parallel worktree-based task decomposition and dispatch (/batch).
 
-A Godspeed-scale take on Claude Code's ``/batch``: decompose a goal into
-independent units, run each unit as a sub-agent inside its own isolated git
-worktree, and collect results.
+Decompose a goal into independent units, run each unit as a sub-agent
+inside its own isolated git worktree, and collect results.
 
 Architecture
 ------------

@@ -1,11 +1,12 @@
-"""Hook dispatcher — orchestrates hook execution with auto-approve/deny.
+﻿"""Hook dispatcher — orchestrates hook execution with auto-approve/deny.
 
 Higher-level layer over ``HookExecutor`` that adds:
 
 1. **Auto-approve / auto-deny** — JSON-configurable rules that short-circuit
    hook execution for known-safe or known-dangerous patterns.
 2. **Adapters** — thin translation layers that map external hook formats
-   (Claude Code, OpenCode) to Godspeed's ``HookEvent`` + ``HookDefinition``.
+   (dict-shaped and flat-list JSON configs) to Godspeed's ``HookEvent`` +
+   ``HookDefinition``.
 3. **Sandbox awareness** — integrates ``SandboxPolicy`` so hooks can read
    technical containment decisions.
 """
@@ -286,7 +287,7 @@ class HookDispatcher:
         self._executor.run_post_session()
 
     def run_stop(self) -> None:
-        """Fire the STOP event (Claude Code parity)."""
+        """Fire the STOP event."""
         self._executor.fire(HookEvent.STOP)
 
     def run_notification(self, message: str = "") -> None:
@@ -294,10 +295,10 @@ class HookDispatcher:
         self._executor.fire(HookEvent.NOTIFICATION, message=message)
 
 
-class ClaudeCodeAdapter:
-    """Translate Claude Code hook format to Godspeed ``HookDefinition`` list.
+class AgentHooksAdapter:
+    """Translate the dict-shaped agent hooks JSON format to Godspeed ``HookDefinition`` list.
 
-    Claude Code uses JSON config with ``hooks`` dict keyed by event name::
+    The dict-shaped format uses a JSON config with a ``hooks`` dict keyed by event name::
 
         {
             "hooks": {
@@ -320,15 +321,15 @@ class ClaudeCodeAdapter:
     }
 
     @classmethod
-    def translate(cls, claude_config: dict[str, Any], *, source: str = "") -> list[HookDefinition]:
-        """Convert a Claude Code hooks config to Godspeed HookDefinitions."""
-        hooks_raw = claude_config.get("hooks", {})
+    def translate(cls, hooks_config: dict[str, Any], *, source: str = "") -> list[HookDefinition]:
+        """Convert a dict-shaped hooks config to Godspeed HookDefinitions."""
+        hooks_raw = hooks_config.get("hooks", {})
         definitions: list[HookDefinition] = []
 
         for event_name, hooks_list in hooks_raw.items():
             godspeed_event = cls._EVENT_MAP.get(event_name)
             if godspeed_event is None:
-                logger.debug("Unknown Claude Code hook event: %s", event_name)
+                logger.debug("Unknown hook event: %s", event_name)
                 continue
             if not isinstance(hooks_list, list):
                 continue
@@ -351,7 +352,7 @@ class ClaudeCodeAdapter:
 
     @classmethod
     def from_json(cls, path: Path) -> list[HookDefinition]:
-        """Load and translate a Claude Code hooks JSON file.
+        """Load and translate a dict-shaped hooks JSON file.
 
         Hooks from files failing the pre-trust gate (e.g. project-shipped
         configs) are dropped fail-closed.
@@ -361,16 +362,16 @@ class ClaudeCodeAdapter:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to load Claude Code hooks from %s: %s", path, exc)
+            logger.warning("Failed to load hooks from %s: %s", path, exc)
             return []
         definitions = cls.translate(data, source=str(path))
         return filter_trusted_hooks(definitions)
 
 
-class OpenCodeAdapter:
-    """Translate OpenCode hook format to Godspeed ``HookDefinition`` list.
+class FlatListHooksAdapter:
+    """Translate the flat-list hooks JSON format to Godspeed ``HookDefinition`` list.
 
-    OpenCode uses a flat list of event-command pairs::
+    The flat-list format uses event-command pairs::
 
         [
             {"event": "pre_tool_use", "command": "..."},
@@ -391,15 +392,15 @@ class OpenCodeAdapter:
 
     @classmethod
     def translate(
-        cls, opencode_config: list[dict[str, Any]], *, source: str = ""
+        cls, hooks_config: list[dict[str, Any]], *, source: str = ""
     ) -> list[HookDefinition]:
-        """Convert an OpenCode hooks config to Godspeed HookDefinitions."""
+        """Convert a flat-list hooks config to Godspeed HookDefinitions."""
         definitions: list[HookDefinition] = []
-        for hook_spec in opencode_config:
+        for hook_spec in hooks_config:
             event_name = hook_spec.get("event", "")
             godspeed_event = cls._EVENT_MAP.get(event_name)
             if godspeed_event is None:
-                logger.debug("Unknown OpenCode hook event: %s", event_name)
+                logger.debug("Unknown hook event: %s", event_name)
                 continue
             command = hook_spec.get("command", "")
             if not command:
@@ -416,7 +417,7 @@ class OpenCodeAdapter:
 
     @classmethod
     def from_json(cls, path: Path) -> list[HookDefinition]:
-        """Load and translate an OpenCode hooks JSON file.
+        """Load and translate a flat-list hooks JSON file.
 
         Hooks from files failing the pre-trust gate are dropped fail-closed.
         """
@@ -425,7 +426,7 @@ class OpenCodeAdapter:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
-            logger.warning("Failed to load OpenCode hooks from %s: %s", path, exc)
+            logger.warning("Failed to load hooks from %s: %s", path, exc)
             return []
         if not isinstance(data, list):
             return []

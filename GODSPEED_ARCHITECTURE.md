@@ -713,7 +713,7 @@ Hash-chained audit log for tamper detection:
 
 **Files**: `evolution/trace_analyzer.py`, `evolution/mutator.py`, `evolution/fitness.py`, `evolution/safety.py`, `evolution/registry.py`, `evolution/applier.py`, `evolution/hardware.py`, `evolution/cross_session.py`, `evolution/skill_gen.py`, `evolution/permissions.py`
 
-Inspired by [NousResearch/hermes-agent-self-evolution](https://github.com/NousResearch/hermes-agent-self-evolution). Runs the entire evolution loop locally via Ollama for **$0**. Optional paid API acceleration.
+Self-evolution loop that improves the agent from its own audit trail. Runs the entire evolution loop locally via Ollama for **$0**. Optional paid API acceleration.
 
 ### Pipeline
 
@@ -734,7 +734,7 @@ Streaming line-by-line reads (not `readlines()`) for low-memory devices like Jet
 
 ### Evolution Engine (GEPA-style Mutations)
 
-GEPA (Generalized Evolutionary Prompt Augmentation) is a technique for improving agent prompts through LLM-guided mutation + fitness evaluation. The approach draws conceptual lineage from the self-evolution pattern demonstrated in [NousResearch/hermes-agent-self-evolution](https://github.com/NousResearch/hermes-agent-self-evolution), adapted here with hardware-aware model selection, multi-dimensional fitness scoring, and a safety gate that blocks regressions.
+GEPA (Generalized Evolutionary Prompt Augmentation) is a technique for improving agent prompts through LLM-guided mutation + fitness evaluation, adapted here with hardware-aware model selection, multi-dimensional fitness scoring, and a safety gate that blocks regressions.
 
 **Note on the name:** "GEPA" is an informal naming convention used in this codebase, not a widely published academic standard. The core mechanism — LLM-guided mutation, LLM-as-judge fitness scoring, safety gates — is a well-established pattern in self-improving agents. The specific implementation (mutation candidates, fitness weights, hardware-aware routing) is original to Godspeed.
 

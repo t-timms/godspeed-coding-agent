@@ -17,10 +17,8 @@ Design features:
 - Integrates with existing Conversation compaction tiers (32K/100K)
 - Integrates with cheapest-model compaction for cost efficiency
 
-References:
-- Claude Code layered cached context
-- openJiuwen Context Management + Goal Mode
-- SOTA AHE finding: tools/memory carry gains; prompt-only regresses
+Design rationale: layered caching plus tool/memory context carries the
+measurable gains; prompt-only additions regress.
 """
 
 from __future__ import annotations

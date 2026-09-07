@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 
 # Godspeed
 
@@ -81,7 +81,7 @@ Plan mode now ends through an explicit approval gate: the agent calls `exit_plan
 
 ## The Problem
 
-Every AI agent that touches your codebase — Claude Code, Cursor, Hermes, your custom agent — can read files, write code, and run shell commands. Most do not ship with a cryptographically verifiable record of what they actually did. Most do not fail closed by default when a tool call is ambiguous. Most do not catch secrets before they reach the model.
+Every automated agent that touches your codebase can read files, write code, and run shell commands. Most do not ship with a cryptographically verifiable record of what they actually did. Most do not fail closed by default when a tool call is ambiguous. Most do not catch secrets before they reach the model.
 
 You are expected to trust the model.
 
@@ -106,7 +106,7 @@ Use it standalone as a CLI coding agent, or plug it into your existing agent sta
 
 ### Capability
 
-- **200+ LLM providers via LiteLLM** — Claude, GPT, Gemini, Ollama, and everything else LiteLLM supports. Godspeed wraps LiteLLM's unified interface with fallback chains, model routing, cost tracking, and retry logic. Configure fallback chains so work never stops. ([LiteLLM attribution](#inspiration--attribution))
+- **200+ LLM providers via LiteLLM** — Claude, GPT, Gemini, Ollama, and everything else LiteLLM supports. Godspeed wraps LiteLLM's unified interface with fallback chains, model routing, cost tracking, and retry logic. Configure fallback chains so work never stops. ([Architecture notes](#architecture-notes))
 - **30+ built-in tools** — Core (29): `file_read` (images, PDFs, notebooks), `file_write`, `file_edit` (fuzzy matching), `notebook_edit`, `file_move`, `image_read`, `pdf_read`, `shell` (foreground + background), `glob`, `grep`, `git`, `github` (PR/issue via `gh`), `diff_apply` (unified diffs), `verify` (6 languages), `test_runner` (5 frameworks), `web_search`, `web_fetch`, `repo_map`, `code_search`, `tasks`, `background_check`, `coverage`, `complexity`, `dep_audit`, `security_scan`, `generate_tests`, `traceback_analyzer`, `system_optimizer`, `db_query`. Infrastructure (3): `ollama_manager`, `llamacpp_manager`, `stock_price` (API connectivity test utility). Full schema reference in [`GODSPEED_ARCHITECTURE.md`](GODSPEED_ARCHITECTURE.md).
 - **Parallel tool execution** -- when the LLM returns multiple tool calls, they execute concurrently via `asyncio.gather()`. 3-phase dispatch: parse → permission check (sequential) → execute (parallel). READ_ONLY tools always parallel, write tools always serial.
 - **Speculative tool dispatch** -- during streaming, READ_ONLY tool calls are dispatched as background `asyncio.Task`s before the full response completes. The main loop awaits cached results instead of re-dispatching, eliminating dispatch latency for reads.
@@ -122,7 +122,7 @@ Use it standalone as a CLI coding agent, or plug it into your existing agent sta
 - **Background commands** -- `shell` tool gains `background: true` parameter. `BackgroundRegistry` tracks processes. `background_check` tool for status/output/kill.
 - **Checkpoint save/restore** -- `/checkpoint name` saves conversation state, `/restore name` loads it back. Never lose context again.
 - **Memory** -- SQLite-backed persistent preferences, session event logging, and automatic correction tracking across sessions.
-- **Cross-agent project instructions** -- loads `GODSPEED.md`, `AGENTS.md` (Linux Foundation standard), `CLAUDE.md`, and `.cursorrules`. Zero-friction migration from any agent.
+- **Persistent project instructions** -- loads `GODSPEED.md` and `AGENTS.md` (Linux Foundation standard), plus recognized agent-instruction file conventions. Zero-friction adoption in existing projects.
 - **Token cost tracking** -- real-time token usage and estimated cost per session. `/stats` command. Supports 20+ model pricing tiers. Local models always show "free".
 - **Prompt caching** -- system prompt marked with `cache_control` for Anthropic/OpenAI. ~50% cost reduction on repeated prefixes.
 - **Headless/CI mode** -- `godspeed run` for non-interactive execution. Task from positional arg, `--prompt-file`, or stdin. `--timeout N` wall-clock cap. Differentiated exit codes (0 success, 1 tool error, 2 max iterations, 3 budget, 4 LLM error, 5 invalid input, 6 timeout, 130 interrupt) for pipeline orchestration. JSON output includes `exit_reason`, `iterations_used`, `tool_calls`, `cost_usd`, `duration_seconds`, `audit_log_path`. Audit trail is written by default. A ready-made GitHub Actions workflow (`.github/workflows/godspeed-review.yml`) runs a deterministic secrets scan plus optional LLM code review on every PR. **VS Code extension** (alpha): send files, selections, and diffs to `godspeed run` from the editor — see [`ide/vscode/`](ide/vscode/).
@@ -308,7 +308,7 @@ Switch models at any time with `/model <name>` inside the TUI, or run `godspeed 
 
 Godspeed auto-upgrades `ollama/` to `ollama_chat/` for tool-capable models (Qwen, Llama, Gemma, Mistral, etc.).
 
-Godspeed reads `GODSPEED.md`, `AGENTS.md`, `CLAUDE.md`, and `.cursorrules` from the project root for persistent instructions. Bring your existing config from any agent.
+Godspeed reads `GODSPEED.md` and `AGENTS.md` from the project root for persistent instructions, along with recognized agent-instruction file conventions used by other tooling. Existing setups keep working without changes.
 
 ### First session
 
@@ -415,16 +415,16 @@ Permission rules use glob-style matching against `ToolName(argument)` strings. D
 | `GEMINI_API_KEY` | Gemini access |
 | `GODSPEED_MODEL` | Override default model |
 
-## Inspiration & Attribution
+## Architecture Notes
 
-Godspeed stands on the shoulders of excellent prior work:
+Godspeed's design decisions and their rationale:
 
-- **Agent loop pattern** — Inspired by hand-rolled ReAct loops from open-source agent research and the proven design that the LLM decides when to stop. Permission gating at every tool call is an original extension.
-- **Dangerous command detection** — Inspired by [Hermes Agent's Tirith security scanner](https://github.com/monocle-ai/tirith). The regex-based approach to blocking destructive shell commands follows their design.
-- **LiteLLM** — Unified provider access via the [LiteLLM](https://github.com/BerriAI/litellm) library. Godspeed would not support 200+ providers without it.
+- **Agent loop** — a hand-rolled ReAct loop in which the LLM decides when to stop. Permission gating at every tool call is an original extension.
+- **Dangerous command detection** — regex-based blocking of destructive shell commands, with real-world attack-pattern coverage in the test suite.
+- **LiteLLM** — unified provider access via the [LiteLLM](https://github.com/BerriAI/litellm) library. Godspeed would not support 200+ providers without it.
 - **Prompt-toolkit + Rich** — The TUI is built on [prompt-toolkit](https://github.com/prompt-toolkit/python-prompt-toolkit) for input handling and [Rich](https://github.com/Textualize/rich) for output rendering.
 - **SWE-Bench** — Benchmark methodology and harness from [SWE-bench](https://github.com/SWE-bench/SWE-bench). All published numbers use their evaluation protocol.
-- **AGENTS.md / CLAUDE.md** — Cross-agent config file idea from the [Linux Foundation's AGENTS.md proposal](https://github.com/LinusDierheimer/.agents.md) and Anthropic's CLAUDE.md convention.
+- **AGENTS.md** — Persistent project instructions follow the [Linux Foundation's AGENTS.md proposal](https://github.com/LinusDierheimer/.agents.md); recognized agent-instruction file conventions are loaded automatically.
 
 Security-first design, speculative tool dispatch, self-evolution, and multi-language verification are original contributions.
 

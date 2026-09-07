@@ -206,10 +206,7 @@ benchmarks/results/
 |-----------|-------|------|
 | SWE-bench | ICLR 2024 | [arxiv.org/abs/2310.06770](https://arxiv.org/abs/2310.06770) |
 | SWE-bench Verified | OpenAI Blog | [swebench.com/verified](https://www.swebench.com/verified.html) |
-| mini-SWE-agent (65%) | GitHub | [github.com/SWE-agent/mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) |
-| Refact.ai Agent (60%) | Product | [refact.ai](https://refact.ai) |
 | ExpeRepair v1.0 | arXiv | [arxiv.org/abs/2503.08715](https://arxiv.org/abs/2503.08715) |
-| Aider Polyglot Benchmark | Leaderboard | [aider.chat/docs/leaderboards](https://aider.chat/docs/leaderboards/) |
 | LiveCodeBench | arXiv | [arxiv.org/abs/2403.07974](https://arxiv.org/abs/2403.07974) |
 | BigCodeBench | ICLR 2025 Oral | [openreview.net/forum?id=YrycTjllL0](https://openreview.net/forum?id=YrycTjllL0) |
 | RepoBench | arXiv | [arxiv.org/abs/2306.03091](https://arxiv.org/abs/2306.03091) |

@@ -349,7 +349,7 @@ class GodspeedSettings(BaseSettings):
     must_fix_cap: int = 3  # max must-fix injections per session
     max_speculative_cache_size: int = 10  # max concurrent speculative tasks per iteration
 
-    # Per-session lifetime caps (Claude Code parity)
+    # Per-session lifetime caps
     max_spawns_per_session: int = 200
     max_web_calls_per_session: int = 200
     session_timeout_seconds: int = 0  # 0 = no wall-clock limit

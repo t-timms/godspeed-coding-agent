@@ -3,8 +3,7 @@
 This module provides a runtime gate that chains the classic static
 verification (lint/type-check) with a dynamic check: does the project
 actually build, launch, and stay alive long enough to be considered
-healthy? This mirrors the SOTA harness pattern (e.g. Claude Code
-``/verify``) where the running app is observed, not just compiled.
+healthy? The running app is observed, not just compiled.
 
 The module is intentionally pure and unit-testable: every step
 (build, launch, probe, kill) is a small function with a bounded

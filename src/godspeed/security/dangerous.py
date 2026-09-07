@@ -1,8 +1,7 @@
 """Dangerous command detection — pattern matching for destructive operations.
 
-Inspired by Hermes Agent's Tirith security scanner. Detects commands that
-could cause irreversible damage: recursive deletes, disk operations,
-pipe-to-shell, SQL injection, etc.
+Detects commands that could cause irreversible damage: recursive deletes,
+disk operations, pipe-to-shell, SQL injection, etc.
 """
 
 from __future__ import annotations

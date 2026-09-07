@@ -49,36 +49,7 @@ Any MCP client needs:
 
 On connect, the client discovers Godspeed's registered built-in tools and their JSON schemas.
 
-## 6) Client-specific examples
-
-### Claude Code (`.claude/settings.json`)
-
-```json
-{
-  "mcpServers": {
-    "godspeed": {
-      "command": "godspeed",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-### Claude Desktop (`claude_desktop_config.json`)
-
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Linux: `~/.config/Claude/claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "godspeed": {
-      "command": "godspeed",
-      "args": ["serve"]
-    }
-  }
-}
-```
+## 6) Client configuration examples
 
 ### Generic MCP client (stdio pattern)
 
@@ -88,6 +59,20 @@ On connect, the client discovers Godspeed's registered built-in tools and their 
   "transport": "stdio",
   "command": "godspeed",
   "args": ["serve"]
+}
+```
+
+Clients that follow the common `mcpServers` settings convention use the
+same shape in their own settings file:
+
+```json
+{
+  "mcpServers": {
+    "godspeed": {
+      "command": "godspeed",
+      "args": ["serve"]
+    }
+  }
 }
 ```
 

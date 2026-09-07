@@ -4,7 +4,7 @@ ACP is a lightweight HTTP+JSON protocol for agent-to-agent interop.  This
 module provides:
 
 - ``ACPClient``: discovers capabilities and drives sessions on an external
-  agent server (Claude, Codex, OpenCode, or any ACP-compliant agent).
+  ACP-compliant agent server.
 - ``ACPToolAdapter``: wraps a remote agent as a Godspeed ``Tool`` so the
   LLM can delegate subtasks to it seamlessly.
 - ``ACPToolDefinition``: metadata about a remote agent's capabilities.

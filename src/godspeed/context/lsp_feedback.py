@@ -5,8 +5,8 @@ injects relevant warnings/errors as passive feedback into the conversation.
 The agent sees diagnostic context without needing to explicitly run a
 linter/verifier — reducing tool calls and improving self-correction.
 
-This follows the openJiuwen pattern of passive middleware feedback:
-the LSP runs as infrastructure, not as a tool call.
+LSP feedback runs as passive middleware infrastructure — not as an
+explicit tool call — so diagnostics reach the model without extra turns.
 
 Design:
 - Runs diagnostics via subprocess (pyright/basedpyright/ruff LSP)
@@ -17,9 +17,8 @@ Design:
   ruff's AST-based checks miss
 - Gracefully degrades: no-op if no LSP server configured
 
-References:
-- openJiuwen Context Management: tools/middleware carry gains
-- Claude Code: integrated LSP diagnostics in context
+Design rationale: integrating LSP diagnostics directly into the agent's
+context catches classes of errors that static lint-only gates miss.
 """
 
 from __future__ import annotations

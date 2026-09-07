@@ -1,6 +1,6 @@
 """Tests for the `godspeed mcp` CLI commands (add/list/remove).
 
-Covers the Claude Code `claude mcp` parity surface: adding stdio and SSE
+Covers the MCP server management surface: adding stdio and SSE
 servers into the persistent settings.yaml, duplicate handling with --force,
 listing with scope, removal with unknown-name errors, and round-tripping
 through the real GodspeedSettings loader.

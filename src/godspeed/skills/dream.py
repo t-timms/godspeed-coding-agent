@@ -1,8 +1,8 @@
 """Dream consolidation — cross-session pruning, dedup, and date normalization.
 
-Modeled after Claude Code's Auto-Dream: runs periodically (24h) to scan
-skill directories and lesson stores, merging duplicates, removing stale
-entries, and converting relative dates to absolute.
+Runs periodically (24h) to scan skill directories and lesson stores,
+merging duplicates, removing stale entries, and converting relative
+dates to absolute.
 """
 
 from __future__ import annotations

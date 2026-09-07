@@ -1,7 +1,7 @@
 """Deep analysis tool: 3-step structured reasoning (generate -> critique -> refine).
 
-Inspired by Refact.ai's approach (60% on SWE-Bench Lite). Uses the agent's
-existing LLM client for consistency — no separate API key or raw HTTP calls.
+Uses the agent's existing LLM client for consistency — no separate API key
+or raw HTTP calls.
 """
 
 from __future__ import annotations

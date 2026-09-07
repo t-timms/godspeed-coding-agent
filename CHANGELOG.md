@@ -112,9 +112,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     per skill, merges duplicates, and rewrites SKILL.md when enough
     high-confidence lessons accumulate. Timestamped backups before mutation.
   - **Dream consolidation** (`skills/dream.py`) — cross-session pruning,
-    dedup, and date normalization modeled on Claude Code's Auto-Dream.
-    Runs periodically (24h) to scan skill directories, merge duplicates,
-    remove stale entries, and convert relative dates to absolute.
+    dedup, and date normalization. Runs periodically (24h) to scan skill
+    directories, merge duplicates, remove stale entries, and convert
+    relative dates to absolute.
   - **Wiki bridge** (`skills/wiki_bridge.py`) — auto-generate SKILL.md
     files from llm-wiki knowledge base pages. Frontmatter extraction,
     tag filtering, topic matching, and reference preservation.
@@ -1005,7 +1005,7 @@ suitable for unattended use in CI, W&B sweeps, and ML research pipelines.
 
 - **Token cost tracking**: `llm/cost.py` — model-aware pricing table for 20+ models (Claude, GPT, Gemini, DeepSeek). `/stats` command shows token usage and estimated cost. Quit screen includes session cost. Ollama/local models always show "free".
 - **Enhanced diff previews**: Permission prompts now show unified diff format with `@@ hunk` headers, line change stats (`+5 -3 lines`), and up to 30 context lines. File write prompts show line count and overwrite warning.
-- **Multi-file project instructions**: Loads GODSPEED.md, AGENTS.md (Linux Foundation AAIF standard), CLAUDE.md, and .cursorrules. Priority: GODSPEED.md > AGENTS.md > CLAUDE.md > .cursorrules. Zero-friction migration from other agents.
+- **Multi-file project instructions**: Loads GODSPEED.md, AGENTS.md (Linux Foundation AAIF standard), and recognized agent-instruction file conventions, with a defined priority order. Zero-friction adoption in existing projects.
 - **Prompt caching**: System prompt marked with `cache_control: ephemeral` for Anthropic/OpenAI models. ~50% cost reduction on repeated prefixes via LiteLLM.
 - **Conversation export**: `/export [name]` command writes session as formatted markdown to `.godspeed/exports/`. Includes system prompt, messages, tool calls, and results.
 - **Multi-language verify**: Auto-verify now supports Python (ruff), JS/TS (biome/eslint), Go (go vet), Rust (cargo check), and C/C++ (clang-tidy). Linters detected dynamically. Shared `_run_linter()` helper.
