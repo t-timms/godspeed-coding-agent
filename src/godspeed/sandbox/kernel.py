@@ -464,6 +464,9 @@ def _build_linux_plan(cmd: list[str], cwd: Path, policy: SandboxPolicy) -> Execu
             os.write(write_fd, b"1" if net_ok else b"0")
 
     def post_start(_proc: Any) -> EnforcementReport | None:
+        # Close the parent's status-pipe write end so the read end returns
+        # EOF when the child did not report; the ruleset fd stays with the
+        # parent until cleanup() runs after the process completes.
         if write_fd is not None:
             with contextlib.suppress(OSError):
                 os.close(write_fd)
@@ -481,11 +484,20 @@ def _build_linux_plan(cmd: list[str], cwd: Path, policy: SandboxPolicy) -> Execu
             with contextlib.suppress(OSError):
                 os.close(status_fd)
 
+    # close_fds runs in the child BEFORE preexec_fn, so every fd the
+    # preexec touches must travel in pass_fds or it will be closed already:
+    # the Landlock ruleset fd used by landlock_restrict_self, and the
+    # status-pipe write end used to report the unshare outcome.
+    child_fds: tuple[int, ...] = (ruleset_fd,)
+    if write_fd is not None:
+        child_fds = (ruleset_fd, write_fd)
+
     return ExecutionPlan(
         argv=cmd,
         preexec=preexec,
         env={},
         report=base_report,
+        pass_fds=child_fds,
         post_start=post_start,
         cleanup=cleanup,
     )

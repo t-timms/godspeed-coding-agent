@@ -282,6 +282,7 @@ def test_windows_plan_is_lifetime_only_and_suspended(
     monkeypatch.setattr(kernel_module.sys, "platform", "win32")
     if not real_is_windows:
         monkeypatch.setattr(kernel_module, "_JobObject", _FakeJobObject)
+        monkeypatch.setattr(kernel_module, "_CREATE_SUSPENDED", 0)
     cmd = ["cmd", "/c", "echo hi"]
     plan = plan_execution(cmd, cwd=tmp_path, policy=_policy())
     assert plan.argv == cmd
@@ -396,6 +397,7 @@ async def test_windows_kernel_mode_produces_honest_header(
     monkeypatch.setattr(kernel_module.sys, "platform", "win32")
     if not real_is_windows:
         monkeypatch.setattr(kernel_module, "_JobObject", _FakeJobObject)
+        monkeypatch.setattr(kernel_module, "_CREATE_SUSPENDED", 0)
     ctx.sandbox = _policy()
     result = await tool.execute({"command": "echo hello"}, ctx)
     assert result.is_error is False
