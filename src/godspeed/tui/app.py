@@ -676,6 +676,8 @@ class TUIApp:
                 on_parallel_start=_track_parallel_start,
                 on_parallel_complete=_track_parallel_complete,
                 on_thinking=_on_thinking,
+                session_id=self._session_id,
+                durability=True,
             )
             _output.console.print()  # End streaming output with newline
         except AgentCancelledError:

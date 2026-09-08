@@ -101,11 +101,14 @@ def _build_tool_registry(
 
     sandbox = None
     if settings is not None:
+        from godspeed.config import SandboxMode
         from godspeed.sandbox.policy import build_sandbox_policy
 
         sandbox = build_sandbox_policy(
             blocked_paths=settings.sandbox_settings.blocked_paths or None,
             writable_paths=settings.sandbox_settings.writable_paths or None,
+            enable_network=not settings.sandbox_settings.network_restricted,
+            kernel_enforced=settings.sandbox_settings.mode == SandboxMode.KERNEL,
         )
 
     registry = ToolRegistry(sandbox=sandbox)

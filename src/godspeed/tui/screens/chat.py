@@ -341,6 +341,8 @@ class ChatScreen(Screen):
                 hook_executor=self._hook_executor,
                 on_thinking=_on_thinking,
                 task_store=getattr(self._commands, "_task_store", None),
+                session_id=self._session_id,
+                durability=True,
             )
             chat_log.end_turn()
             chat_log.write()

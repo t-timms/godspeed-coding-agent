@@ -9,9 +9,12 @@ Fail-closed: any ambiguity results in denial.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import logging
 import threading
 import time
+from pathlib import Path
 
 from godspeed.security.dangerous import detect_dangerous_command
 from godspeed.security.plan_gate import PLAN_GATE_TOOL_NAME
@@ -55,6 +58,21 @@ def _extract_tool_prefix(pattern: str) -> str | None:
     return pattern[:idx] if idx > 0 else None
 
 
+MAX_PENDING = 50
+_GODSPEED_DIR_NAME = ".godspeed"
+_PENDING_DIR_NAME = "pending_approvals"
+
+
+def approval_fingerprint(tool_name: str, arguments: dict | None) -> str:
+    """Stable sha256 fingerprint of a tool call for durable approvals.
+
+    Includes the tool name and canonical (sorted-key) JSON of the
+    arguments so an identical request after a restart matches.
+    """
+    canonical = json.dumps(arguments or {}, sort_keys=True, default=str)
+    return hashlib.sha256(f"{tool_name}\n{canonical}".encode()).hexdigest()
+
+
 class PermissionEngine:
     """4-tier permission engine with deny-first evaluation.
 
@@ -79,6 +97,7 @@ class PermissionEngine:
         allow_patterns: list[str] | None = None,
         ask_patterns: list[str] | None = None,
         tool_risk_levels: dict[str, RiskLevel] | None = None,
+        pending_dir: Path | None = None,
     ) -> None:
         self._deny_rules = parse_rules(deny_patterns or [], RuleAction.DENY)
         self._allow_rules = parse_rules(allow_patterns or [], RuleAction.ALLOW)
@@ -88,6 +107,8 @@ class PermissionEngine:
         self._grant_ttl: float = 3600.0  # 1 hour default
         self._grants_lock = threading.Lock()
         self.plan_mode: bool = False
+        # Crash-durable pending approvals; None disables persistence (default).
+        self._pending_dir = pending_dir
 
         # Build tool-name indexes for O(1) rule lookup. Wildcard rules
         # (e.g., "*(*)") are kept in a separate list checked every time.
@@ -186,11 +207,14 @@ class PermissionEngine:
         # 5. Ask rules (indexed lookup)
         for rule in self._rules_for_tool(self._ask_index, self._ask_wildcards, tool_name):
             if rule.matches(formatted):
-                return PermissionDecision(ASK, f"Matched ask rule: {rule.pattern}")
+                return self._ask_or_replay(tool_call, f"Matched ask rule: {rule.pattern}")
 
         # 6. Default based on risk level
         risk = self._tool_risk_levels.get(tool_call.tool_name, RiskLevel.HIGH)
-        return self._default_for_risk(risk)
+        decision = self._default_for_risk(risk)
+        if decision == ASK:
+            return self._ask_or_replay(tool_call, decision.reason)
+        return decision
 
     def add_rule(self, pattern: str, action: str) -> None:
         """Add a pattern to the in-memory rule list at runtime.
@@ -286,6 +310,107 @@ class PermissionEngine:
             grants = list(self._session_grants.keys())
 
         return any(fnmatch.fnmatch(tool_call_str, pattern) for pattern in grants)
+
+    def _ask_or_replay(self, tool_call: ToolCall, reason: str) -> PermissionDecision:
+        """Return a replayed decision for a pending approval, else ASK.
+
+        When a pending record exists for this exact tool call (same
+        fingerprint) with a recorded decision, that decision is replayed
+        and the record is consumed. Otherwise the decision is persisted as
+        pending so a crash before the user answers can be reconciled next
+        session.
+        """
+        if self._pending_dir is None:
+            return PermissionDecision(ASK, reason)
+        fingerprint = approval_fingerprint(tool_call.tool_name, tool_call.arguments)
+        replayed = self._replay_pending(fingerprint)
+        if replayed is not None:
+            return replayed
+        self._persist_pending(fingerprint, tool_call, reason)
+        return PermissionDecision(ASK, reason)
+
+    def _pending_path(self, fingerprint: str) -> Path:
+        if self._pending_dir is None:
+            raise RuntimeError("Pending-approvals directory is not configured")
+        return self._pending_dir / f"{fingerprint}.json"
+
+    def _persist_pending(self, fingerprint: str, tool_call: ToolCall, reason: str) -> None:
+        """Persist a pending approval record BEFORE prompting. Fail-safe."""
+        try:
+            self._pending_dir.mkdir(parents=True, exist_ok=True)
+            record = {
+                "fingerprint": fingerprint,
+                "tool_name": tool_call.tool_name,
+                "arguments_json": json.dumps(
+                    tool_call.arguments or {}, sort_keys=True, default=str
+                ),
+                "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "rule_suggestion": reason,
+            }
+            self._pending_path(fingerprint).write_text(
+                json.dumps(record, indent=2), encoding="utf-8"
+            )
+            self._evict_pending()
+        except OSError as exc:
+            logger.warning(
+                "Pending approval persist failed fingerprint=%s error=%s", fingerprint, exc
+            )
+
+    def _evict_pending(self) -> None:
+        """Cap the pending directory at MAX_PENDING, evicting oldest by mtime."""
+        try:
+            entries = sorted(
+                self._pending_dir.glob("*.json"),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for stale in entries[: max(0, len(entries) - MAX_PENDING)]:
+                stale.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Pending approval eviction failed error=%s", exc)
+
+    def record_decision(self, fingerprint: str, approved: bool) -> None:
+        """Record the user's decision on a pending approval. Fail-safe.
+
+        Called by the permission proxy after the user answers an ASK
+        prompt. If the process dies before the tool executes, the next
+        session replays this decision instead of re-prompting.
+        """
+        if self._pending_dir is None:
+            return
+        path = self._pending_path(fingerprint)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.debug("No pending record for fingerprint=%s", fingerprint)
+            return
+        record["decision"] = "approved" if approved else "denied"
+        record["decided_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        try:
+            path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "Pending approval decision write failed fingerprint=%s error=%s", fingerprint, exc
+            )
+
+    def _replay_pending(self, fingerprint: str) -> PermissionDecision | None:
+        """Replay a recorded decision for a pending approval, if any.
+
+        Returns None when there is no record or no recorded decision (the
+        user never answered before the crash — re-ask). Consumes the
+        record on replay so a decision is applied exactly once.
+        """
+        path = self._pending_path(fingerprint)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        decision = record.get("decision")
+        if decision not in ("approved", "denied"):
+            return None
+        path.unlink(missing_ok=True)
+        if decision == "approved":
+            return PermissionDecision(ALLOW, "replayed from pending record")
+        return PermissionDecision(DENY, "replayed from pending record (denied)")
 
     @staticmethod
     def _default_for_risk(risk: RiskLevel) -> PermissionDecision:

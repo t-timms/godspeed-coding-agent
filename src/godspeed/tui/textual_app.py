@@ -270,6 +270,7 @@ class GodspeedTextualApp(App):
                 allow_patterns=settings.permissions.allow,
                 ask_patterns=settings.permissions.ask,
                 tool_risk_levels=self._risk_levels,
+                pending_dir=effective_project_dir / ".godspeed" / "pending_approvals",
             )
             self._permission_engine = permission_engine
 
@@ -656,7 +657,12 @@ class _InteractivePermissionProxy:
             return decision
 
         args = getattr(tool_call, "arguments", None) or {}
+        from godspeed.security.permissions import approval_fingerprint
         from godspeed.tui.screens.permission_dialog import PermissionDialog
+
+        fingerprint = approval_fingerprint(
+            tool_call.tool_name, getattr(tool_call, "arguments", None)
+        )
 
         try:
             answer = await self._app.push_screen(
@@ -667,6 +673,7 @@ class _InteractivePermissionProxy:
             answer = "no"
 
         if answer in ("y", "yes"):
+            self._engine.record_decision(fingerprint, True)
             pattern = tool_call.format_for_permission
             if self._tracker is not None:
                 self._tracker.record_approval(pattern)
@@ -675,6 +682,7 @@ class _InteractivePermissionProxy:
             return PermissionDecision(ALLOW, "user approved")
 
         if answer in ("a", "always"):
+            self._engine.record_decision(fingerprint, True)
             pattern = tool_call.format_for_permission
             risk = self._engine._tool_risk_levels.get(tool_call.tool_name, RiskLevel.HIGH)
             if risk == RiskLevel.LOW:
@@ -685,6 +693,7 @@ class _InteractivePermissionProxy:
             self._engine.grant_session_permission(pattern)
             return PermissionDecision(ALLOW, f"session grant: {pattern}")
 
+        self._engine.record_decision(fingerprint, False)
         return PermissionDecision("deny", "user denied")
 
     def _suggest_auto_permission(self, pattern: str) -> None:
