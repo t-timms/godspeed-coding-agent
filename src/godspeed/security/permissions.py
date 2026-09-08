@@ -330,6 +330,8 @@ class PermissionEngine:
         return PermissionDecision(ASK, reason)
 
     def _pending_path(self, fingerprint: str) -> Path:
+        if self._pending_dir is None:
+            raise RuntimeError("Pending-approvals directory is not configured")
         return self._pending_dir / f"{fingerprint}.json"
 
     def _persist_pending(self, fingerprint: str, tool_call: ToolCall, reason: str) -> None:
