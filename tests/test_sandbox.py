@@ -5,10 +5,10 @@ from __future__ import annotations
 
 from godspeed.sandbox.docker import DockerSandboxConfig
 from godspeed.sandbox.policy import (
-    NetworkRule,
     SandboxPolicy,
     evaluate_sandbox,
 )
+from godspeed.sandbox.policy_types import NetworkRule
 from godspeed.tools.base import ToolCall
 
 
