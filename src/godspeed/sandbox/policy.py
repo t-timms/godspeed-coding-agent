@@ -196,11 +196,18 @@ def validate_shell_command(command: str, sandbox: SandboxPolicy) -> tuple[bool, 
 def build_sandbox_policy(
     blocked_paths: list[str] | None = None,
     writable_paths: list[str] | None = None,
+    *,
+    enable_network: bool | None = None,
+    kernel_enforced: bool = False,
 ) -> SandboxPolicy:
     """Construct a SandboxPolicy from configuration values.
 
     When no blocked_paths are provided, ships secure defaults that deny
     access to sensitive system locations regardless of platform.
+
+    ``enable_network`` defaults to True when not provided.  ``kernel_enforced``
+    opts the shell tool into OS-level kernel sandboxing (Landlock/Seatbelt/
+    Job Object) with honest per-platform enforcement reporting.
     """
     defaults: list[str] = []
     if blocked_paths is None:
@@ -223,4 +230,6 @@ def build_sandbox_policy(
     return SandboxPolicy(
         blocked_paths=blocked_paths if blocked_paths is not None else defaults,
         writable_paths=writable_paths or [],
+        enable_network=enable_network if enable_network is not None else True,
+        kernel_enforced=kernel_enforced,
     )

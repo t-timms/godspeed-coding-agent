@@ -52,7 +52,7 @@ def _load_yaml_cached(path: Path) -> dict[str, Any] | None:
 
 
 _PERMISSION_MODES = ("strict", "normal", "yolo")
-_SANDBOX_MODES = ("none", "docker")
+_SANDBOX_MODES = ("none", "docker", "kernel")
 _EXECUTION_MODES = ("tool", "codeact")
 
 
@@ -74,10 +74,15 @@ class SandboxMode(StrEnum):
 
     ``none``:   No sandboxing.
     ``docker``: Run tools inside a Docker container.
+    ``kernel``: OS-level kernel sandboxing (Landlock on Linux, Seatbelt on
+        macOS, Job Object lifetime-bounding on Windows).  Enforcement is
+        per-platform and reported honestly on every tool result; on Windows
+        this is lifetime-bounding only, never access enforcement.
     """
 
     NONE = "none"
     DOCKER = "docker"
+    KERNEL = "kernel"
 
 
 class ExecutionMode(StrEnum):
@@ -219,12 +224,30 @@ class ContextSettings(BaseSettings):
 
 
 class SandboxSettings(BaseSettings):
-    """Sandboxing configuration for tool execution."""
+    """Sandboxing configuration for tool execution.
+
+    ``mode`` selects the sandboxing strategy: ``none`` (no sandbox),
+    ``docker`` (container isolation), or ``kernel`` (OS-level kernel
+    sandboxing — Landlock on Linux, Seatbelt on macOS, Job Object
+    lifetime-bounding on Windows).  Kernel enforcement is reported honestly
+    on every tool result; platforms/features that cannot be enforced are
+    never claimed as enforced.
+
+    ``network_restricted`` controls whether the kernel sandbox denies
+    network access (default True).  On Linux this maps to a network
+    namespace attempt via ``unshare(CLONE_NEWNET)``; when unavailable (e.g.
+    WSL2) the tool reports network as NOT restricted.  On macOS the Seatbelt
+    profile denies network.  On Windows network access is never restricted
+    by the kernel sandbox (Job Objects are lifetime-only) and the report
+    says so explicitly.  ``network_enabled`` is the legacy Docker-era toggle
+    and is not consulted by the kernel path.
+    """
 
     mode: SandboxMode = SandboxMode.NONE
     image: str = "python:3.12-slim"
     timeout_seconds: int = 120
     network_enabled: bool = False
+    network_restricted: bool = True
 
     blocked_paths: list[str] = Field(default_factory=list)
     writable_paths: list[str] = Field(default_factory=list)

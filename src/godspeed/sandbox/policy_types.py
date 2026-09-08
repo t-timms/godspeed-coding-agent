@@ -52,6 +52,10 @@ class SandboxPolicy:
         network_rules: Ordered network access rules (first match wins).
         docker: Optional Docker sandbox configuration.
         enable_network: Global network toggle.
+        kernel_enforced: When True, the shell tool applies OS-level kernel
+            sandboxing (Landlock/Seatbelt/Job Object) on top of the policy
+            checks.  Enforcement is per-platform and reported honestly on
+            every tool result.
     """
 
     writable_paths: list[str] = field(default_factory=list)
@@ -60,6 +64,7 @@ class SandboxPolicy:
     network_rules: list[NetworkRule] = field(default_factory=list)
     docker: DockerSandboxConfig | None = None
     enable_network: bool = True
+    kernel_enforced: bool = False
 
     def is_path_writable(self, path: str) -> bool:
         """Check if a path falls within any writable directory."""

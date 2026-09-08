@@ -13,6 +13,13 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from godspeed.sandbox.kernel import (
+    ExecutionPlan,
+    KernelEnforcement,
+    SandboxConstructionError,
+    format_enforcement_header,
+    plan_execution,
+)
 from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -37,6 +44,14 @@ class _ShellNotFoundError(Exception):
 
 class _ShellTimeoutError(Exception):
     """Raised when a shell command exceeds its timeout."""
+
+
+class _SandboxUnavailableError(Exception):
+    """Raised when kernel sandboxing was requested but cannot be enforced."""
+
+
+class _SandboxSetupError(Exception):
+    """Raised when kernel sandbox setup fails after process creation."""
 
 
 def _truncate_output(output: str) -> str:
@@ -242,27 +257,66 @@ class ShellTool(Tool):
         shell_prefix = _detect_shell()
         logger.info("shell.execute command=%r timeout=%d", command, timeout)
 
+        # Kernel sandbox planning — fail CLOSED when kernel sandboxing was
+        # requested but cannot be enforced (never silently unsandboxed).
+        plan: ExecutionPlan | None = None
+        header = ""
+        if sandbox is not None and sandbox.kernel_enforced:
+            try:
+                plan = plan_execution([*shell_prefix, command], cwd=context.cwd, policy=sandbox)
+            except SandboxConstructionError as exc:
+                logger.error("sandbox.construction-failed: %s", exc)
+                return ToolResult.failure(f"Sandbox construction failed: {exc}")
+            if plan.report.strategy != KernelEnforcement.JOB_OBJECT and not plan.report.enforced:
+                details = "; ".join(plan.report.details)
+                logger.error("sandbox.unavailable: %s", details)
+                return ToolResult.failure(f"Sandbox unavailable: {details}")
+            header = format_enforcement_header(plan.report)
+
         # Use Popen + communicate(timeout=...) instead of subprocess.run so
         # we can explicitly kill the process tree on timeout. subprocess.run's
         # timeout cleanup is unreliable on Windows when the child has holding
         # pipes (see _kill_process_tree docstring).
-        def _run_sync() -> tuple[int, str, str]:
+        def _run_sync() -> tuple[int, str, str, str]:
             """Run the command synchronously; called via run_in_executor."""
+            effective_header = header
             proc: subprocess.Popen[str] | None = None
             try:
-                proc = subprocess.Popen(
-                    [*shell_prefix, command],
+                popen_kwargs: dict[str, Any] = dict(
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     cwd=str(context.cwd),
                 )
+                if plan is not None:
+                    if plan.preexec is not None:
+                        popen_kwargs["preexec_fn"] = plan.preexec
+                    if plan.env:
+                        popen_kwargs["env"] = {**os.environ, **plan.env}
+                    if plan.pass_fds:
+                        popen_kwargs["pass_fds"] = plan.pass_fds
+                    if plan.creationflags:
+                        popen_kwargs["creationflags"] = plan.creationflags
+                proc = subprocess.Popen(
+                    plan.argv if plan is not None else [*shell_prefix, command],
+                    **popen_kwargs,
+                )
             except FileNotFoundError as exc:
                 raise _ShellNotFoundError(exc) from exc
 
+            if plan is not None and plan.post_start is not None:
+                try:
+                    updated = plan.post_start(proc)
+                except Exception as exc:
+                    with contextlib.suppress(Exception):
+                        proc.kill()
+                    raise _SandboxSetupError(exc) from exc
+                if updated is not None:
+                    effective_header = format_enforcement_header(updated)
+
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
-                return proc.returncode, stdout, stderr
+                return proc.returncode, stdout, stderr, effective_header
             except subprocess.TimeoutExpired:
                 logger.warning(
                     "shell.timeout pid=%d command=%r timeout=%d - force-killing process tree",
@@ -289,9 +343,12 @@ class ShellTool(Tool):
                 if proc is not None and proc.returncode is None:
                     with contextlib.suppress(Exception):
                         proc.kill()
+                if plan is not None and plan.cleanup is not None:
+                    with contextlib.suppress(Exception):
+                        plan.cleanup()
 
         try:
-            returncode, stdout, stderr = await asyncio.get_running_loop().run_in_executor(
+            returncode, stdout, stderr, header = await asyncio.get_running_loop().run_in_executor(
                 None, _run_sync
             )
         except _ShellNotFoundError as exc:
@@ -301,6 +358,8 @@ class ShellTool(Tool):
                 f"Command timed out after {timeout}s and was force-killed "
                 f"(including any child processes).{exc.args[0]}"
             )
+        except _SandboxSetupError as exc:
+            return ToolResult.failure(f"Sandbox setup failed: {exc}")
 
         output_parts: list[str] = []
         if stdout:
@@ -310,6 +369,9 @@ class ShellTool(Tool):
 
         output = "\n".join(output_parts) if output_parts else "(no output)"
         output = _truncate_output(output)
+
+        if header:
+            output = f"{header}\n{output}"
 
         if returncode != 0:
             return ToolResult.failure(f"Exit code {returncode}\n{output}")
@@ -338,6 +400,10 @@ class ShellTool(Tool):
         shell_prefix = _detect_shell()
         logger.info("shell.background command=%r", command)
 
+        kernel_note = ""
+        if context.sandbox is not None and context.sandbox.kernel_enforced:
+            kernel_note = "sandbox: background execution NOT kernel-sandboxed (v1 limitation)\n"
+
         proc = await asyncio.create_subprocess_exec(
             *shell_prefix,
             command,
@@ -358,7 +424,7 @@ class ShellTool(Tool):
         registry.add(bg_proc)
 
         return ToolResult.success(
-            f"Started background process {pid}\n"
+            f"{kernel_note}Started background process {pid}\n"
             f"Command: {command}\n"
             f"Use background_check to poll status."
         )
