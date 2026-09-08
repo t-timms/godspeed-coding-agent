@@ -1,4 +1,4 @@
-﻿"""Permission rule types for the 4-tier permission engine."""
+"""Permission rule types for the 4-tier permission engine."""
 
 from __future__ import annotations
 
