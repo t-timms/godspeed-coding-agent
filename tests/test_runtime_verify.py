@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 
 from godspeed.tools.runtime_verify import (
@@ -164,14 +165,8 @@ class TestRuntimeVerifier:
         (tmp_path / "pyproject.toml").write_text('[project]\nname = "test"\n', encoding="utf-8")
         slow_cmd = [sys.executable, "-c", "import time; time.sleep(100)"]
         verifier = RuntimeVerifier(tmp_path, build_command=slow_cmd)
-        import godspeed.tools.runtime_verify as rv_mod
-
-        old_timeout = rv_mod.BUILD_TIMEOUT_SECONDS
-        try:
-            rv_mod.BUILD_TIMEOUT_SECONDS = 1
+        with patch("godspeed.tools.runtime_verify.BUILD_TIMEOUT_SECONDS", 1):
             verdict = verifier.verify()
-        finally:
-            rv_mod.BUILD_TIMEOUT_SECONDS = old_timeout
 
         assert verdict.build_ok is False
         assert any("TIMED OUT" in e or "timed out" in e.lower() for e in verdict.evidence)

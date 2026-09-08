@@ -1,4 +1,4 @@
-"""Tests for MemoryStore — durable memory substrate with semantic recall."""
+﻿"""Tests for MemoryStore — durable memory substrate with semantic recall."""
 
 from __future__ import annotations
 
@@ -159,6 +159,7 @@ class TestProjectMemory:
 
     def test_access_count_increments(self, store: MemoryStore) -> None:
         mem_id = store.store_project_memory("frequently accessed")
+        assert mem_id
         store.recall_project_memories()
         store.recall_project_memories()
         store.recall_project_memories()
@@ -186,6 +187,7 @@ class TestProjectMemory:
     def test_metadata_roundtrip(self, store: MemoryStore) -> None:
         meta = {"source": "tool_call", "file": "auth.py"}
         mem_id = store.store_project_memory("with meta", metadata=meta)
+        assert mem_id
         memories = store.recall_project_memories()
         assert memories[0].metadata == meta
 
@@ -278,6 +280,7 @@ class TestSecretsRedaction:
     def test_content_redaction(self, store: MemoryStore) -> None:
         """Memory content should be processed through redaction."""
         mem_id = store.store_project_memory("normal content")
+        assert mem_id
         memories = store.recall_project_memories()
         assert len(memories) == 1
 

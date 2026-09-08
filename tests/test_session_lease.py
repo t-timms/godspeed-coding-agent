@@ -217,7 +217,8 @@ class TestScheduleReleaseOnTaskDone:
 
         async def _runner() -> None:
             task = asyncio.create_task(_main())
-            await task
+            completed = await task
+            assert completed is None
             # Let the done-callback's scheduled release task run.
             await asyncio.sleep(0.05)
 

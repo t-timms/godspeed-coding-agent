@@ -1,4 +1,4 @@
-"""Tests for the diff review commands (/code-review, /security-review, /simplify, /effort)."""
+﻿"""Tests for the diff review commands (/code-review, /security-review, /simplify, /effort)."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import godspeed.agent.review as review_module
 from godspeed.agent.review import (
+    MAX_DIFF_LINES,
     ReviewDiff,
     collect_diff,
     findings_from_response,
@@ -91,11 +91,11 @@ class TestPureHelpers:
         assert result.error == "Not a git repository."
 
     def test_collect_diff_truncation(self) -> None:
-        big_diff = "\n".join(f"+line{i}" for i in range(review_module.MAX_DIFF_LINES + 50))
+        big_diff = "\n".join(f"+line{i}" for i in range(MAX_DIFF_LINES + 50))
         result = collect_diff(Path("."), runner=_git_runner(diff=big_diff))
         assert result.ok
         assert result.truncated
-        assert len(result.diff_text.splitlines()) == review_module.MAX_DIFF_LINES
+        assert len(result.diff_text.splitlines()) == MAX_DIFF_LINES
 
     def test_collect_diff_changed_files(self) -> None:
         result = collect_diff(
@@ -164,7 +164,7 @@ class TestEffortCommand:
 class TestReviewCommands:
     @pytest.mark.asyncio
     async def test_review_requires_repo(self, commands: Commands) -> None:
-        with patch.object(review_module, "collect_diff", return_value=ReviewDiff(error="no")):
+        with patch("godspeed.agent.review.collect_diff", return_value=ReviewDiff(error="no")):
             output = _capture(commands.dispatch, "/code-review")
         assert "no" in output
 
@@ -174,7 +174,7 @@ class TestReviewCommands:
     ) -> None:
         collect = MagicMock(return_value=ReviewDiff(diff_text="+ changed"))
         with (
-            patch.object(review_module, "collect_diff", collect),
+            patch("godspeed.agent.review.collect_diff", collect),
             patch("godspeed.agent.review.collect_diff", collect, create=True),
         ):
             commands.dispatch("/code-review")
@@ -187,7 +187,7 @@ class TestReviewCommands:
     async def test_code_review_fix_queues_guidance(self, commands: Commands) -> None:
         collect = MagicMock(return_value=ReviewDiff(diff_text="+ changed"))
         with (
-            patch.object(review_module, "collect_diff", collect),
+            patch("godspeed.agent.review.collect_diff", collect),
         ):
             output = _capture(commands.dispatch, "/code-review --fix")
         assert "queued" in output.lower()
@@ -201,8 +201,8 @@ class TestReviewCommands:
         spy_prompt = MagicMock(return_value="prompt")
         collect = MagicMock(return_value=ReviewDiff(diff_text="+ x"))
         with (
-            patch.object(review_module, "collect_diff", collect),
-            patch.object(review_module, "review_prompt", spy_prompt),
+            patch("godspeed.agent.review.collect_diff", collect),
+            patch("godspeed.agent.review.review_prompt", spy_prompt),
             patch("godspeed.agent.review.review_prompt", spy_prompt, create=True),
         ):
             commands.dispatch("/simplify")
@@ -218,8 +218,8 @@ class TestReviewCommands:
 
         collect = MagicMock(return_value=ReviewDiff(diff_text="+key", changed_files=["cfg.py"]))
         with (
-            patch.object(review_module, "collect_diff", collect),
-            patch.object(review_module, "security_scan_files", security_scan_files, create=True),
+            patch("godspeed.agent.review.collect_diff", collect),
+            patch("godspeed.agent.review.security_scan_files", security_scan_files, create=True),
         ):
             commands.dispatch("/security-review")
             await asyncio.sleep(0.05)
@@ -230,6 +230,6 @@ class TestReviewCommands:
     async def test_llm_failure_graceful(self, commands: Commands) -> None:
         commands._llm_client.chat = AsyncMock(side_effect=RuntimeError("no key"))
         collect = MagicMock(return_value=ReviewDiff(diff_text="+ x"))
-        with patch.object(review_module, "collect_diff", collect):
+        with patch("godspeed.agent.review.collect_diff", collect):
             commands.dispatch("/code-review")
             await asyncio.sleep(0.05)

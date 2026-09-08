@@ -101,6 +101,7 @@ class TestUserMemoryRedaction:
             corrected=f"use {_GITHUB_PAT} instead",
             context="fix secret leak",
         )
+        assert cid
         corrections = user_mem.get_corrections()
         assert len(corrections) == 1
         assert _OPENAI_KEY not in corrections[0]["original"]
@@ -132,6 +133,7 @@ class TestSessionMemoryRedaction:
     def test_record_event_redacts_openai_key(self, sess_mem: SessionMemory) -> None:
         self._start(sess_mem)
         eid = sess_mem.record_event("s1", "tool_call", detail=f"exec with {_OPENAI_KEY}")
+        assert eid
         events = sess_mem.get_events("s1")
         assert len(events) == 1
         assert _OPENAI_KEY not in events[0]["detail"]
@@ -196,6 +198,7 @@ class TestStoreProfileRedaction:
 
     def test_project_memory_redacted(self, store: MemoryStore) -> None:
         mid = store.store_project_memory(f"config: {_OPENAI_KEY}")
+        assert mid
         entries = store.recall_project_memories()
         assert len(entries) == 1
         assert _OPENAI_KEY not in entries[0].content
