@@ -12,9 +12,33 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _normalize_pattern_tool_name(pattern: str) -> str:
+    """Normalize the tool-name token of a rule pattern to snake_case.
+
+    Only the token before the first ``(`` is normalized; the argument
+    glob is left untouched. Uses the canonical ``normalize_tool_name``
+    from ``tools.base`` so rule patterns and formatted calls always
+    agree.
+    """
+    from godspeed.tools.base import normalize_tool_name
+
+    head, sep, rest = pattern.partition("(")
+    if not sep:
+        return normalize_tool_name(head)
+    return normalize_tool_name(head) + sep + rest
+
+
 def _compile_glob(pattern: str) -> re.Pattern:
-    """Compile a fnmatch glob pattern to a regex once."""
-    return re.compile(fnmatch.translate(pattern))
+    """Compile a normalized fnmatch glob to a case-insensitive regex once.
+
+    Case-insensitive as defense in depth: file extensions compare
+    case-insensitively on Windows filesystems, and a deny rule must never
+    be silently dead because of a case mismatch.
+    """
+    return re.compile(fnmatch.translate(_normalize_pattern_tool_name(pattern)), re.IGNORECASE)
 
 
 class RuleAction(StrEnum):

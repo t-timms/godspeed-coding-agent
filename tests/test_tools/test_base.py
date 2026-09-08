@@ -50,15 +50,19 @@ class TestToolCall:
 
     def test_format_with_string_arg(self) -> None:
         tc = ToolCall(tool_name="Bash", arguments={"command": "git status"})
-        assert tc.format_for_permission == "Bash(git status)"
+        assert tc.format_for_permission == "bash(git status)"
 
     def test_format_no_args(self) -> None:
         tc = ToolCall(tool_name="FileRead", arguments={})
-        assert tc.format_for_permission == "FileRead()"
+        assert tc.format_for_permission == "file_read()"
 
     def test_format_non_string_args(self) -> None:
         tc = ToolCall(tool_name="Resize", arguments={"width": 100, "height": 200})
-        assert tc.format_for_permission == "Resize(*)"
+        assert tc.format_for_permission == "resize(*)"
+
+    def test_format_normalizes_snake_case_name_unchanged(self) -> None:
+        tc = ToolCall(tool_name="file_write", arguments={"file_path": "prod.env"})
+        assert tc.format_for_permission == "file_write(prod.env)"
 
 
 class TestToolContext:
