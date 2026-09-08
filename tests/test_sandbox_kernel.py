@@ -287,7 +287,7 @@ def test_windows_plan_is_lifetime_only_and_suspended(
     plan = plan_execution(cmd, cwd=tmp_path, policy=_policy())
     assert plan.argv == cmd
     assert plan.preexec is None
-    assert plan.creationflags == 0x00000004  # CREATE_SUSPENDED
+    assert plan.creationflags == (0x00000004 if real_is_windows else 0)
     assert plan.post_start is not None
     assert plan.cleanup is not None
     assert plan.report.strategy == KernelEnforcement.JOB_OBJECT

@@ -117,6 +117,14 @@ class _LibcHandle:
         self._libc.syscall.argtypes = [ctypes.c_long]
         self._libc.unshare.restype = ctypes.c_int
         self._libc.unshare.argtypes = [ctypes.c_int]
+        self._libc.prctl.restype = ctypes.c_int
+        self._libc.prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
 
     def syscall(self, number: int, *args: Any) -> int:
         """Invoke ``syscall(2)``; *args* must be explicit ctypes objects."""
@@ -125,6 +133,10 @@ class _LibcHandle:
     def unshare(self, flags: int) -> int:
         """Invoke ``unshare(2)``; returns 0 on success, -1 on failure."""
         return int(self._libc.unshare(flags))
+
+    def prctl(self, option: int, arg2: int, arg3: int, arg4: int, arg5: int) -> int:
+        """Invoke ``prctl(2)``; returns 0 on success, -1 on failure."""
+        return int(self._libc.prctl(option, arg2, arg3, arg4, arg5))
 
 
 if sys.platform.startswith("linux"):
