@@ -6,7 +6,8 @@ import asyncio
 
 import pytest
 
-from godspeed.sandbox.policy import NetworkRule, SandboxPolicy
+from godspeed.sandbox.policy import SandboxPolicy
+from godspeed.sandbox.policy_types import NetworkRule
 from godspeed.tools.base import RiskLevel, ToolCall, ToolContext
 from godspeed.tools.registry import ToolRegistry
 from tests.conftest import MockTool
