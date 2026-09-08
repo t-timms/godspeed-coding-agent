@@ -318,7 +318,17 @@ class PermissionEngine:
             # Snapshot grants under lock, then match outside
             grants = list(self._session_grants.keys())
 
-        return any(fnmatch.fnmatch(tool_call_str, pattern) for pattern in grants)
+        # Normalize the grant's tool-name token so a CamelCase grant
+        # ("Bash(npm *)") matches the canonical formatted call
+        # ("bash(npm install)") on every platform: fnmatch.fnmatch is
+        # case-sensitive on POSIX but case-folds on Windows, and matching
+        # must not depend on the OS.
+        from godspeed.security.rules import normalize_pattern_tool_name
+
+        return any(
+            fnmatch.fnmatch(tool_call_str, normalize_pattern_tool_name(pattern))
+            for pattern in grants
+        )
 
     def _ask_or_replay(self, tool_call: ToolCall, reason: str) -> PermissionDecision:
         """Return a replayed decision for a pending approval, else ASK.
