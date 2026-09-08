@@ -1,4 +1,4 @@
-﻿"""Tests for the diff review commands (/code-review, /security-review, /simplify, /effort)."""
+"""Tests for the diff review commands (/code-review, /security-review, /simplify, /effort)."""
 
 from __future__ import annotations
 

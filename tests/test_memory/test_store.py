@@ -1,4 +1,4 @@
-﻿"""Tests for MemoryStore — durable memory substrate with semantic recall."""
+"""Tests for MemoryStore — durable memory substrate with semantic recall."""
 
 from __future__ import annotations
 
