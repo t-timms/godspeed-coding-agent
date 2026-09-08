@@ -66,8 +66,6 @@ def _extract_tool_prefix(pattern: str) -> str | None:
 
 
 MAX_PENDING = 50
-_GODSPEED_DIR_NAME = ".godspeed"
-_PENDING_DIR_NAME = "pending_approvals"
 
 
 def approval_fingerprint(tool_name: str, arguments: dict | None) -> str:
