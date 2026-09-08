@@ -6,9 +6,11 @@ import asyncio
 import logging
 import uuid
 from collections import defaultdict, deque
+from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from godspeed.agent.conversation import Conversation
@@ -491,8 +493,13 @@ class KanbanSwarm:
 class SpawnAgentTool(Tool):
     """Tool for the LLM to spawn sub-agents for complex sub-tasks."""
 
-    def __init__(self, coordinator: AgentCoordinator) -> None:
+    def __init__(
+        self,
+        coordinator: AgentCoordinator,
+        agent_definition_resolver: Callable[[Path], dict[str, Any]] | None = None,
+    ) -> None:
         self._coordinator = coordinator
+        self._agent_definition_resolver = agent_definition_resolver
 
     @property
     def name(self) -> str:
@@ -549,9 +556,11 @@ class SpawnAgentTool(Tool):
 
         agent_name = arguments.get("agent_name")
         if agent_name is not None:
-            from godspeed.skills.agent_loader import load_agent_definitions
-
-            definitions = load_agent_definitions(context.cwd)
+            if self._agent_definition_resolver is None:
+                return ToolResult.failure(
+                    f"Unknown agent {agent_name!r}: no agent definitions are configured."
+                )
+            definitions = self._agent_definition_resolver(context.cwd)
             definition = definitions.get(agent_name)
             if definition is None:
                 available = ", ".join(sorted(definitions)) or "none"

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
-import godspeed.skills.agent_loader as agent_loader_mod
 from godspeed.agent.coordinator import CapabilityBundle, SpawnAgentTool, SubAgentConfig
 from godspeed.skills.agent_loader import (
     AGENT_NAME_MAX_CHARS,
@@ -23,7 +22,7 @@ from godspeed.tools.base import ToolContext
 @pytest.fixture(autouse=True)
 def _isolate_user_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point the user agent dir at a temp dir so tests never touch ~/.godspeed."""
-    monkeypatch.setattr(agent_loader_mod, "USER_AGENT_DIR", tmp_path / "user-agents")
+    monkeypatch.setattr("godspeed.skills.agent_loader.USER_AGENT_DIR", tmp_path / "user-agents")
 
 
 def _write_agent(
@@ -213,7 +212,7 @@ class TestSpawnAgentToolResolution:
         )
         coordinator = AsyncMock()
         coordinator.spawn.return_value = "ok"
-        tool = SpawnAgentTool(coordinator)
+        tool = SpawnAgentTool(coordinator, agent_definition_resolver=load_agent_definitions)
 
         result = await tool.execute(
             {"task": "Review main.py", "agent_name": "reviewer"}, tool_context
@@ -247,7 +246,7 @@ class TestSpawnAgentToolResolution:
         _write_agent(tmp_path, "reviewer", {"name": "reviewer", "effort": "low"})
         coordinator = AsyncMock()
         coordinator.spawn.return_value = "ok"
-        tool = SpawnAgentTool(coordinator)
+        tool = SpawnAgentTool(coordinator, agent_definition_resolver=load_agent_definitions)
 
         result = await tool.execute(
             {"task": "Review", "agent_name": "reviewer", "model": "gpt-x", "effort": "high"},

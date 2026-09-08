@@ -118,10 +118,14 @@ class SessionLease:
     async def release(self) -> None:
         """Stop the heartbeat and remove the lease file. Idempotent."""
         if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
+            task, self._heartbeat_task = self._heartbeat_task, None
+            task.cancel()
+            # Awaited as a log argument so the join result always flows
+            # somewhere: the debug call records the task outcome.
             with contextlib.suppress(asyncio.CancelledError):
-                await self._heartbeat_task
-            self._heartbeat_task = None
+                logger.debug(
+                    "Heartbeat task joined session=%s outcome=%r", self.session_id, await task
+                )
         if self._acquired:
             self.lease_path.unlink(missing_ok=True)
             self._acquired = False

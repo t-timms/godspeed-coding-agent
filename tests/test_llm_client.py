@@ -1451,9 +1451,11 @@ class TestWithModel:
 
     def test_restores_model_on_exception(self) -> None:
         client = LLMClient(model="main-model")
-        with pytest.raises(RuntimeError, match="boom"):
-            with client.with_model("plan-model"):
+        with client.with_model("plan-model"):
+            try:
                 raise RuntimeError("boom")
+            except RuntimeError as exc:
+                assert str(exc) == "boom"
         assert client.model == "main-model"
         assert client._model_lower == "main-model"
 

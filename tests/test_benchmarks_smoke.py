@@ -137,7 +137,6 @@ class TestPreflightOffline:
 
     def test_offline_dry_run_skips_network(self) -> None:
         """skip_network=True records a skipped check and never calls the fetcher."""
-        report = PreFlightReport()
         with patch.dict(os.environ, {"NVIDIA_NIM_API_KEYS": "nvapi-secret-key-123"}):
             report = run_all_checks(skip_network=True)
         conn = next(r for r in report.results if r.name == "NIM connectivity")

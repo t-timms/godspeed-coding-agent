@@ -12,9 +12,6 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
-
-
 def normalize_pattern_tool_name(pattern: str) -> str:
     """Normalize the tool-name token of a rule pattern to snake_case.
 

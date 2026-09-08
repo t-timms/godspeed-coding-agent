@@ -69,7 +69,7 @@ class TestEvaluateSandboxNetwork:
         result = evaluate_sandbox(tool_call, policy)
         assert result.allowed is False
         assert result.sandbox_ok is False
-        assert "evil.com" in result.reason
+        assert result.reason == "Network access denied: evil.com:*"
 
     def test_web_fetch_to_allowed_host_passes(self) -> None:
         policy = SandboxPolicy(
