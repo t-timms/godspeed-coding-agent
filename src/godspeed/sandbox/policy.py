@@ -23,7 +23,6 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from godspeed.sandbox.policy_types import NetworkRule as NetworkRule
 from godspeed.sandbox.policy_types import SandboxPolicy
 from godspeed.security.permissions import ALLOW, PermissionDecision, PermissionEngine
 from godspeed.tools.base import ToolCall
@@ -55,8 +54,6 @@ class SandboxApprovalResult:
 
 
 _URL_RE = re.compile(r"https?://([^:/\s]+)(?::(\d+))?")
-
-_PATH_LIKE_RE = re.compile(r"(?:^|\s)([/\\]?[\w./\\-]+\.\w+)")
 
 
 def _extract_network_target(tool_call: ToolCall) -> tuple[str | None, int | None]:
