@@ -74,10 +74,9 @@ class _LandlockPathBeneathAttr(ctypes.Structure):
 
 
 # LANDLOCK_ACCESS_FS_* rights (ABI 1) — include/uapi/linux/landlock.h
-_LANDLOCK_ACCESS_FS_EXECUTE = 1 << 0
+# Reads stay unrestricted by design: the ruleset landlocks write-related
+# rights only, so only the write-side constants below are used.
 _LANDLOCK_ACCESS_FS_WRITE_FILE = 1 << 1
-_LANDLOCK_ACCESS_FS_READ_FILE = 1 << 2
-_LANDLOCK_ACCESS_FS_READ_DIR = 1 << 3
 _LANDLOCK_ACCESS_FS_REMOVE_DIR = 1 << 4
 _LANDLOCK_ACCESS_FS_REMOVE_FILE = 1 << 5
 _LANDLOCK_ACCESS_FS_MAKE_CHAR = 1 << 6
@@ -593,7 +592,7 @@ def _build_macos_plan(cmd: list[str], cwd: Path, policy: SandboxPolicy) -> Execu
             network_restricted=network_restricted,
             details=[
                 "Seatbelt profile via sandbox-exec (deprecated since macOS 10.15; "
-                "enforcement not verified)",
+                + "enforcement not verified)",
                 "seccomp BPF filter out of scope v1",
             ],
         ),

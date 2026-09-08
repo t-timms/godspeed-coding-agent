@@ -217,7 +217,14 @@ class ACPClient:
             content = "\n".join(parts)
 
         session.messages.append({"role": "assistant", "content": content})
-        return str(content)
+        text = str(content)
+        if len(text.encode("utf-8", errors="replace")) > _MAX_RESPONSE_BYTES:
+            encoded = text.encode("utf-8", errors="replace")[:_MAX_RESPONSE_BYTES]
+            text = encoded.decode("utf-8", errors="ignore")
+            text += (
+                f"\n... ({len(content) - len(text)} chars truncated at {_MAX_RESPONSE_BYTES} bytes)"
+            )
+        return text
 
     async def close_session(self, session_id: str) -> None:
         """Close an ACP session."""

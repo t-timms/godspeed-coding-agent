@@ -23,7 +23,8 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from godspeed.sandbox.policy_types import NetworkRule, SandboxPolicy  # noqa: F401
+from godspeed.sandbox.policy_types import NetworkRule as NetworkRule
+from godspeed.sandbox.policy_types import SandboxPolicy
 from godspeed.security.permissions import ALLOW, PermissionDecision, PermissionEngine
 from godspeed.tools.base import ToolCall
 
