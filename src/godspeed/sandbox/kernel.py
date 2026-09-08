@@ -22,13 +22,13 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import ctypes.wintypes
 import logging
 import os
 import shutil
 import sys
 import tempfile
 from collections.abc import Callable
-from ctypes import wintypes
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -175,13 +175,13 @@ class _JobObjectBasicLimitInformation(ctypes.Structure):
     _fields_ = [
         ("PerProcessUserTimeLimit", _LargeInteger),
         ("PerJobUserTimeLimit", _LargeInteger),
-        ("LimitFlags", wintypes.DWORD),
+        ("LimitFlags", ctypes.wintypes.DWORD),
         ("MinimumWorkingSetSize", ctypes.c_size_t),
         ("MaximumWorkingSetSize", ctypes.c_size_t),
-        ("ActiveProcessLimit", wintypes.DWORD),
+        ("ActiveProcessLimit", ctypes.wintypes.DWORD),
         ("Affinity", ctypes.c_size_t),
-        ("PriorityClass", wintypes.DWORD),
-        ("SchedulingClass", wintypes.DWORD),
+        ("PriorityClass", ctypes.wintypes.DWORD),
+        ("SchedulingClass", ctypes.wintypes.DWORD),
     ]
 
 
@@ -200,23 +200,27 @@ if sys.platform == "win32":
     _kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)
     _ntdll: Any = ctypes.WinDLL("ntdll", use_last_error=True)
 
-    _kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-    _kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
-    _kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    _kernel32.CreateJobObjectW.restype = ctypes.wintypes.HANDLE
+    _kernel32.CreateJobObjectW.argtypes = [ctypes.wintypes.LPVOID, ctypes.wintypes.LPCWSTR]
+    _kernel32.SetInformationJobObject.restype = ctypes.wintypes.BOOL
     _kernel32.SetInformationJobObject.argtypes = [
-        wintypes.HANDLE,
+        ctypes.wintypes.HANDLE,
         ctypes.c_int,
-        wintypes.LPVOID,
-        wintypes.DWORD,
+        ctypes.wintypes.LPVOID,
+        ctypes.wintypes.DWORD,
     ]
-    _kernel32.OpenProcess.restype = wintypes.HANDLE
-    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    _kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-    _kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-    _kernel32.CloseHandle.restype = wintypes.BOOL
-    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+    _kernel32.OpenProcess.argtypes = [
+        ctypes.wintypes.DWORD,
+        ctypes.wintypes.BOOL,
+        ctypes.wintypes.DWORD,
+    ]
+    _kernel32.AssignProcessToJobObject.restype = ctypes.wintypes.BOOL
+    _kernel32.AssignProcessToJobObject.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.HANDLE]
+    _kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
     _ntdll.NtResumeProcess.restype = ctypes.c_long
-    _ntdll.NtResumeProcess.argtypes = [wintypes.HANDLE]
+    _ntdll.NtResumeProcess.argtypes = [ctypes.wintypes.HANDLE]
 else:
     _kernel32 = None
     _ntdll = None
