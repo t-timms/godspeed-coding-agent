@@ -278,8 +278,9 @@ def test_macos_plan_fails_openly_when_sandbox_exec_missing(
 def test_windows_plan_is_lifetime_only_and_suspended(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    real_is_windows = sys.platform == "win32"
     monkeypatch.setattr(kernel_module.sys, "platform", "win32")
-    if sys.platform != "win32":
+    if not real_is_windows:
         monkeypatch.setattr(kernel_module, "_JobObject", _FakeJobObject)
     cmd = ["cmd", "/c", "echo hi"]
     plan = plan_execution(cmd, cwd=tmp_path, policy=_policy())
@@ -391,8 +392,9 @@ def ctx(tmp_path: Path) -> ToolContext:
 async def test_windows_kernel_mode_produces_honest_header(
     monkeypatch: pytest.MonkeyPatch, tool: ShellTool, ctx: ToolContext
 ) -> None:
+    real_is_windows = sys.platform == "win32"
     monkeypatch.setattr(kernel_module.sys, "platform", "win32")
-    if sys.platform != "win32":
+    if not real_is_windows:
         monkeypatch.setattr(kernel_module, "_JobObject", _FakeJobObject)
     ctx.sandbox = _policy()
     result = await tool.execute({"command": "echo hello"}, ctx)
