@@ -9,6 +9,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -295,7 +296,7 @@ class ShellTool(Tool):
                         popen_kwargs["env"] = {**os.environ, **plan.env}
                     if plan.pass_fds:
                         popen_kwargs["pass_fds"] = plan.pass_fds
-                    if plan.creationflags:
+                    if plan.creationflags and sys.platform == "win32":
                         popen_kwargs["creationflags"] = plan.creationflags
                 proc = subprocess.Popen(
                     plan.argv if plan is not None else [*shell_prefix, command],

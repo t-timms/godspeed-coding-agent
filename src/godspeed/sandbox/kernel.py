@@ -95,6 +95,9 @@ _LANDLOCK_ACCESS_FS_TRUNCATE = 1 << 14
 # CLONE_NEWNET — include/uapi/linux/sched.h
 _CLONE_NEWNET = 0x40000000
 
+# PR_SET_NO_NEW_PRIVS — include/uapi/linux/prctl.h; required by landlock(7)
+_PR_SET_NO_NEW_PRIVS = 38
+
 # sysfs ABI version file (kernel >= 5.13 exposes Landlock here)
 _LANDLOCK_SYSFS_PATH = Path("/sys/kernel/security/landlock")
 
@@ -447,6 +450,11 @@ def _build_linux_plan(cmd: list[str], cwd: Path, policy: SandboxPolicy) -> Execu
         status_fd, write_fd = os.pipe()
 
     def preexec() -> None:
+        # Landlock requires no_new_privs on the calling process, or
+        # landlock_restrict_self returns EPERM for unprivileged callers
+        # (kernel documentation: landlock(7), "Implicitrestrictions").
+        if _LIBC is not None and _LIBC.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_NO_NEW_PRIVS) failed")
         net_ok = True
         if want_network and (_LIBC is None or _LIBC.unshare(_CLONE_NEWNET) != 0):
             net_ok = False
