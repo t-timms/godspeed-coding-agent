@@ -577,6 +577,10 @@ class _JobObject:
     filesystem or network access (reported honestly).
     """
 
+    # Declared explicitly so type checkers on non-Windows platforms see a
+    # definite type; CreateJobObjectW returns a HANDLE (int) on win32 only.
+    _handle: int | None
+
     def __init__(self) -> None:
         if _kernel32 is None:
             raise OSError("kernel32 unavailable (not Windows)")
