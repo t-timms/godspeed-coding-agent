@@ -55,9 +55,6 @@ _SKILL_KEYWORDS: dict[str, tuple[str, ...]] = {
     "data": ("csv", "json", "dataframe", "pandas", "numpy", "dataset"),
 }
 
-# Prompt-cache control headers for Anthropic/OpenAI
-_CACHE_CONTROL_EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
-
 
 # ── Data structures ───────────────────────────────────────────────────
 

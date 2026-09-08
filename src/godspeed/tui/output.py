@@ -127,8 +127,9 @@ def _get_git_branch() -> str:
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except (subprocess.SubprocessError, FileNotFoundError):
-        pass
+    except (subprocess.SubprocessError, FileNotFoundError) as exc:
+        logger.debug("Git branch detection failed: %s", exc)
+        return ""
     return ""
 
 

@@ -138,7 +138,6 @@ class GhRunner(Protocol):
 
     def run(self, args: list[str], cwd: Path) -> tuple[int, str, str]:
         """Run gh with *args* in *cwd*; return (returncode, stdout, stderr)."""
-        ...
 
 
 class UnitExecutor(Protocol):
@@ -146,7 +145,6 @@ class UnitExecutor(Protocol):
 
     async def execute(self, unit: BatchUnit, worktree_path: Path) -> str:
         """Run the unit; return a summary string."""
-        ...
 
 
 def validate_plan(plan: BatchPlan) -> None:

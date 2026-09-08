@@ -101,8 +101,9 @@ class TurnJournal:
                 seq = record.get("seq")
                 if isinstance(seq, int) and seq > last:
                     last = seq
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.warning("Turn journal scan failed path=%s error=%s", self.path, exc)
+            return last
         return last
 
     def start_turn(self, fingerprint: str) -> int:

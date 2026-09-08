@@ -2250,8 +2250,6 @@ class Commands:
             format_error(f"Export failed: {result.error}")
         return CommandResult(handled=True)
 
-        return CommandResult(handled=True)
-
     def _cmd_export(self, args: str = "") -> CommandResult:
         """Export the current conversation as a markdown file."""
         from datetime import datetime
