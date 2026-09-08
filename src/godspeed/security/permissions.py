@@ -50,12 +50,19 @@ ASK = "ask"
 def _extract_tool_prefix(pattern: str) -> str | None:
     """Extract the tool-name prefix from a rule pattern.
 
-    Returns ``None`` for wildcard patterns like ``*(*)``.
+    Returns ``None`` for wildcard patterns like ``*(*)``. The prefix is
+    normalized to snake_case via ``normalize_tool_name`` so documented
+    CamelCase patterns (``FileWrite(*.env*)``) index under the registered
+    name (``file_write``) and are found by the indexed lookup.
     """
     if pattern.startswith("*("):
         return None
     idx = pattern.find("(")
-    return pattern[:idx] if idx > 0 else None
+    if idx <= 0:
+        return None
+    from godspeed.tools.base import normalize_tool_name
+
+    return normalize_tool_name(pattern[:idx])
 
 
 MAX_PENDING = 50
@@ -141,7 +148,9 @@ class PermissionEngine:
 
     def _rules_for_tool(self, index: dict[str, list], wildcards: list, tool_name: str) -> list:
         """Return rules that might match the given tool name."""
-        return index.get(tool_name, []) + wildcards
+        from godspeed.tools.base import normalize_tool_name
+
+        return index.get(normalize_tool_name(tool_name), []) + wildcards
 
     def evaluate(self, tool_call: ToolCall) -> PermissionDecision:
         """Evaluate a tool call against all rules.
@@ -309,7 +318,17 @@ class PermissionEngine:
             # Snapshot grants under lock, then match outside
             grants = list(self._session_grants.keys())
 
-        return any(fnmatch.fnmatch(tool_call_str, pattern) for pattern in grants)
+        # Normalize the grant's tool-name token so a CamelCase grant
+        # ("Bash(npm *)") matches the canonical formatted call
+        # ("bash(npm install)") on every platform: fnmatch.fnmatch is
+        # case-sensitive on POSIX but case-folds on Windows, and matching
+        # must not depend on the OS.
+        from godspeed.security.rules import normalize_pattern_tool_name
+
+        return any(
+            fnmatch.fnmatch(tool_call_str, normalize_pattern_tool_name(pattern))
+            for pattern in grants
+        )
 
     def _ask_or_replay(self, tool_call: ToolCall, reason: str) -> PermissionDecision:
         """Return a replayed decision for a pending approval, else ASK.

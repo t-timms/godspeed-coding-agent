@@ -46,7 +46,12 @@ class TestExtractToolPrefix:
     """Test _extract_tool_prefix helper."""
 
     def test_normal_pattern(self) -> None:
-        assert _extract_tool_prefix("Bash(rm *)") == "Bash"
+        # Prefixes are normalized to snake_case so documented CamelCase
+        # patterns index under the registered tool name.
+        assert _extract_tool_prefix("Bash(rm *)") == "bash"
+
+    def test_camel_case_pattern_normalized(self) -> None:
+        assert _extract_tool_prefix("FileWrite(*.env*)") == "file_write"
 
     def test_no_parens(self) -> None:
         assert _extract_tool_prefix("FileRead") is None
@@ -69,6 +74,21 @@ class TestDenyRules:
     def test_deny_matches_glob(self) -> None:
         engine = PermissionEngine(deny_patterns=["FileRead(*.pem)"])
         tc = ToolCall(tool_name="FileRead", arguments={"file_path": "server.pem"})
+        assert engine.evaluate(tc) == DENY
+
+    def test_deny_matches_registered_snake_case_tool_name(self) -> None:
+        """The shipped example documents CamelCase rules; registered tools are snake_case.
+
+        A deny rule must never be silently dead because of a case mismatch
+        between the documented pattern and the real tool name.
+        """
+        engine = PermissionEngine(deny_patterns=["FileWrite(*.env*)"])
+        tc = ToolCall(tool_name="file_write", arguments={"file_path": "prod.env"})
+        assert engine.evaluate(tc) == DENY
+
+    def test_deny_snake_case_pattern_matches_camel_case_call(self) -> None:
+        engine = PermissionEngine(deny_patterns=["file_read(.env)"])
+        tc = ToolCall(tool_name="FileRead", arguments={"file_path": ".env"})
         assert engine.evaluate(tc) == DENY
 
     def test_deny_overrides_allow(self) -> None:

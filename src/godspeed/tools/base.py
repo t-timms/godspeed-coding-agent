@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import abc
 import functools
+import re
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -50,6 +51,21 @@ class ToolResult(BaseModel):
     success = ok
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def normalize_tool_name(name: str) -> str:
+    """Canonicalize a tool name to snake_case for permission matching.
+
+    Documented rule patterns use CamelCase (``FileWrite(*.env*)``) while
+    registered tools are snake_case (``file_write``) — a difference of an
+    underscore, not just case. Both rule patterns and formatted calls are
+    normalized through this function so deny rules can never be silently
+    dead.
+    """
+    return _CAMEL_BOUNDARY.sub("_", name).lower()
+
+
 class ToolCall(BaseModel):
     """A request to execute a tool with specific arguments."""
 
@@ -66,21 +82,21 @@ class ToolCall(BaseModel):
         'description' field cannot shadow the actual command being executed.
         """
         if isinstance(self.arguments, str):
-            return f"{self.tool_name}({self.arguments})"
+            return f"{normalize_tool_name(self.tool_name)}({self.arguments})"
         if isinstance(self.arguments, dict):
             if not self.arguments:
-                return f"{self.tool_name}()"
+                return f"{normalize_tool_name(self.tool_name)}()"
             if "command" in self.arguments:
-                return f"{self.tool_name}({self.arguments['command']})"
+                return f"{normalize_tool_name(self.tool_name)}({self.arguments['command']})"
             if "file_path" in self.arguments:
-                return f"{self.tool_name}({self.arguments['file_path']})"
+                return f"{normalize_tool_name(self.tool_name)}({self.arguments['file_path']})"
             if "action" in self.arguments:
                 action = self.arguments["action"]
-                return f"{self.tool_name}({action})"
+                return f"{normalize_tool_name(self.tool_name)}({action})"
             for value in self.arguments.values():
                 if isinstance(value, str):
-                    return f"{self.tool_name}({value})"
-        return f"{self.tool_name}(*)"
+                    return f"{normalize_tool_name(self.tool_name)}({value})"
+        return f"{normalize_tool_name(self.tool_name)}(*)"
 
 
 @runtime_checkable
