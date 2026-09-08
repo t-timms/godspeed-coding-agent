@@ -239,6 +239,19 @@ async def _run_app(
         settings=settings,
     )
 
+    if resume_context is not None:
+        from godspeed.agent.turn_journal import reconcile
+
+        resumed_session_id = resume_context["session_id"]
+        result = reconcile(resumed_session_id, effective_project_dir)
+        logger.info(
+            "Turn journal reconcile session=%s verdict=%s last_completed_seq=%d incomplete=%s",
+            resumed_session_id,
+            result.verdict,
+            result.last_completed_seq,
+            result.incomplete,
+        )
+
     registry, risk_levels = _build_tool_registry()
 
     from godspeed.tui.textual_app import GodspeedTextualApp

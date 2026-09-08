@@ -26,6 +26,8 @@ from godspeed.agent.completion_gate import (
 )
 from godspeed.agent.conversation import Conversation
 from godspeed.agent.result import AgentCancelledError, AgentMetrics, ExitReason
+from godspeed.agent.session_lease import SessionLease
+from godspeed.agent.turn_journal import TurnJournal, request_fingerprint
 from godspeed.hooks import HookEvent
 from godspeed.llm.client import ChatResponse, LLMClient
 from godspeed.llm.router import classify_task_type
@@ -194,6 +196,8 @@ async def agent_loop(
     budget_verify_cap: int = 3,
     task_store: Any | None = None,
     completion_gate: bool = False,
+    session_id: str | None = None,
+    durability: bool = False,
 ) -> str:
     """Run the agent loop until the model stops calling tools.
 
@@ -272,6 +276,28 @@ async def agent_loop(
 
     loop_metrics = metrics.loop if metrics is not None else LoopMetrics()
 
+    lease: SessionLease | None = None
+    journal: TurnJournal | None = None
+    turn_seq: int | None = None
+    if durability:
+        if session_id is None:
+            raise ValueError("durability=True requires session_id")
+        lease = SessionLease(session_id, tool_context.cwd)
+        await lease.acquire()
+        lease.schedule_release_on_task_done()
+        journal = TurnJournal(session_id, tool_context.cwd)
+
+    def _start_turn() -> int | None:
+        if journal is None:
+            return None
+        return journal.start_turn(
+            request_fingerprint(
+                getattr(llm_client, "model", ""),
+                conversation.messages,
+                tool_schemas or [],
+            )
+        )
+
     for iteration in range(iteration_limit):
         iter_t0 = time.monotonic()
 
@@ -331,6 +357,7 @@ async def agent_loop(
         llm_t0 = time.monotonic()
         response: ChatResponse | None = None
         last_exc: Exception | None = None
+        turn_seq = _start_turn()
         for llm_attempt in range(state.llm_max_retries + 1):
             try:
                 if on_assistant_chunk is not None:
@@ -356,6 +383,8 @@ async def agent_loop(
             except AgentCancelledError:
                 # Finalize with INTERRUPTED and unwind — don't wrap in LLM_ERROR.
                 logger.info("Agent loop cancelled mid-turn at iteration=%d", iteration)
+                if journal is not None and turn_seq is not None:
+                    journal.complete_turn(turn_seq, "interrupted")
                 if metrics is not None:
                     metrics.iterations_used = iteration
                     metrics.finalize(ExitReason.INTERRUPTED)
@@ -379,6 +408,8 @@ async def agent_loop(
                                 cost_usd=exc.spent,
                             ),
                         )
+                    if journal is not None and turn_seq is not None:
+                        journal.complete_turn(turn_seq, "error", str(exc))
                     if metrics is not None:
                         metrics.iterations_used = iteration
                         metrics.finalize(ExitReason.BUDGET_EXCEEDED)
@@ -389,6 +420,8 @@ async def agent_loop(
                         "Context overflow at iteration=%d — compacting and retrying once",
                         iteration,
                     )
+                    if journal is not None and turn_seq is not None:
+                        journal.complete_turn(turn_seq, "interrupted")
                     max_toks = conversation.max_tokens
                     toks = max(conversation.token_count, max_toks)
                     if graduated_compactor is not None:
@@ -399,6 +432,7 @@ async def agent_loop(
                     else:
                         await _compact_conversation(conversation, llm_client)
                     loop_metrics.record_compaction()
+                    turn_seq = _start_turn()
                     continue
                 last_exc = exc
                 if llm_attempt < state.llm_max_retries:
@@ -410,15 +444,22 @@ async def agent_loop(
                         delay,
                         exc,
                     )
+                    if journal is not None and turn_seq is not None:
+                        journal.complete_turn(turn_seq, "interrupted")
                     await asyncio.sleep(delay)
+                    turn_seq = _start_turn()
                 else:
                     logger.error("LLM call failed error=%s", exc, exc_info=True)
+                    if journal is not None and turn_seq is not None:
+                        journal.complete_turn(turn_seq, "error", str(exc))
                     if metrics is not None:
                         metrics.iterations_used = iteration
                         metrics.finalize(ExitReason.LLM_ERROR)
                     return f"Error: LLM call failed — {exc}"
         if response is None:
             # Defensive — should not happen because we return early on final failure
+            if journal is not None and turn_seq is not None:
+                journal.complete_turn(turn_seq, "error", str(last_exc))
             return f"Error: LLM call failed — {last_exc}"
         loop_metrics.record_llm_call(time.monotonic() - llm_t0)
         loop_metrics.record_token_count(conversation.token_count)
@@ -430,6 +471,7 @@ async def agent_loop(
         # Handle text response (model decided to stop)
         if not response.has_tool_calls:
             final_text = _strip_meta_commentary(response.content)
+            # Pre-completion gate: block stop once when edits unverified or tasks open.
             if completion_gate:
                 state.stop_attempts += 1
                 gate_state = CompletionGateState(
@@ -438,17 +480,12 @@ async def agent_loop(
                     stop_attempts=state.stop_attempts,
                 )
                 if should_block(gate_state) == GateDecision.BLOCK:
-                    if final_text:
-                        conversation.add_assistant_message(
-                            content=final_text,
-                            reasoning_content=response.thinking,
-                        )
-                    conversation.add_user_message(get_checklist_message())
                     logger.info(
                         "Completion gate blocked stop attempt=%d edits=%s",
                         state.stop_attempts,
                         state.has_edits_since_verify,
                     )
+                    conversation.add_user_message(get_checklist_message())
                     continue
             if final_text:
                 # NEW: Pass reasoning_content for DeepSeek V4 multi-turn
@@ -459,6 +496,8 @@ async def agent_loop(
                 # Skip Markdown re-render if we already streamed the text
                 if on_assistant_text and on_assistant_chunk is None:
                     on_assistant_text(final_text)
+            if journal is not None and turn_seq is not None:
+                journal.complete_turn(turn_seq, "completed")
             if metrics is not None:
                 metrics.iterations_used = iteration + 1
                 metrics.finalize(ExitReason.STOPPED)
@@ -492,6 +531,8 @@ async def agent_loop(
             if tool_call is None:
                 retries += 1
                 if retries > effective_max_retries:
+                    if journal is not None and turn_seq is not None:
+                        journal.complete_turn(turn_seq, "error", "too many malformed tool calls")
                     if metrics is not None:
                         metrics.iterations_used = iteration + 1
                         metrics.finalize(ExitReason.TOOL_ERROR)
@@ -675,9 +716,14 @@ async def agent_loop(
         # Drain completed background tasks from this iteration before proceeding
         await _drain_background_tasks(state, conversation, metrics)
 
+        if journal is not None and turn_seq is not None:
+            journal.complete_turn(turn_seq, "completed")
+
     if metrics is not None:
         metrics.iterations_used = iteration_limit
         metrics.finalize(ExitReason.MAX_ITERATIONS)
+    if journal is not None and turn_seq is not None:
+        journal.complete_turn(turn_seq, "error", "max iterations reached")
     return "Error: Reached maximum iterations. The task may be too complex for a single turn."
 
 
