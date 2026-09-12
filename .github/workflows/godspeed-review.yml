@@ -1,4 +1,4 @@
-﻿name: Godspeed PR Review
+name: Godspeed PR Review
 
 # Runs godspeed headlessly on each PR to summarize the diff, flag bugs,
 # and run the deterministic secrets scan. Falls back gracefully when no
@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
