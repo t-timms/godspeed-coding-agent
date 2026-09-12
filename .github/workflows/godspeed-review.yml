@@ -1,4 +1,4 @@
-﻿name: Godspeed PR Review
+name: Godspeed PR Review
 
 # Runs godspeed headlessly on each PR to summarize the diff, flag bugs,
 # and run the deterministic secrets scan. Falls back gracefully when no
@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
