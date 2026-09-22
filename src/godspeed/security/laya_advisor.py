@@ -76,6 +76,16 @@ class LayaAdvisor:
         self._agent: Any | None = None
         self._agent_load_failed = False
         self._agent_lock = threading.Lock()
+        # Single worker: Laya's own thread-safety under concurrent predict()
+        # calls on one loaded model isn't confirmed, so calls are serialized
+        # rather than risking a race inside the model. Known v1 trade-off:
+        # if a turn issues multiple ASK-tier shell calls concurrently
+        # (agent_loop's asyncio.gather), later ones can spuriously hit their
+        # timeout while queued behind an earlier call, since
+        # future.result(timeout=...) clocks from submission, not from when
+        # execution actually starts. Fails neutral either way (annotation is
+        # just dropped), so this is a missed-advisory cost, not a
+        # correctness or security one.
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="laya-advisor")
 
     @classmethod

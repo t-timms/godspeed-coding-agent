@@ -589,10 +589,14 @@ async def agent_loop(
                             await tool_context.audit.arecord(
                                 event_type="permission_check",
                                 detail={
+                                    # Metadata spread first so the fixed
+                                    # audit-log keys below always win on any
+                                    # name collision with a future metadata
+                                    # producer.
+                                    **(decision.metadata or {}),
                                     "tool": tc.tool_name,
                                     "reason": decision.reason,
                                     "decision": decision.action,
-                                    **(decision.metadata or {}),
                                 },
                                 outcome="denied",
                             )
@@ -618,9 +622,9 @@ async def agent_loop(
                         await tool_context.audit.arecord(
                             event_type="permission_grant",
                             detail={
+                                **(decision.metadata or {}),
                                 "tool": tc.tool_name,
                                 "decision": decision.action,
-                                **(decision.metadata or {}),
                             },
                             outcome="success",
                         )
