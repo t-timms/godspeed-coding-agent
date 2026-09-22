@@ -585,6 +585,17 @@ async def agent_loop(
                         loop_metrics.record_tool_denial()
                         if on_permission_denied:
                             on_permission_denied(tc.tool_name, reason)
+                        if tool_context.audit is not None:
+                            await tool_context.audit.arecord(
+                                event_type="permission_check",
+                                detail={
+                                    "tool": tc.tool_name,
+                                    "reason": decision.reason,
+                                    "decision": decision.action,
+                                    **(decision.metadata or {}),
+                                },
+                                outcome="denied",
+                            )
                         if hook_executor is not None:
                             await asyncio.get_running_loop().run_in_executor(
                                 None,
@@ -603,6 +614,16 @@ async def agent_loop(
                             ),
                         )
                         return None
+                    if tool_context.audit is not None:
+                        await tool_context.audit.arecord(
+                            event_type="permission_grant",
+                            detail={
+                                "tool": tc.tool_name,
+                                "decision": decision.action,
+                                **(decision.metadata or {}),
+                            },
+                            outcome="success",
+                        )
                     if hook_executor is not None:
                         await asyncio.get_running_loop().run_in_executor(
                             None,

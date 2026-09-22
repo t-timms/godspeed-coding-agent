@@ -293,6 +293,24 @@ class BatchSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class LayaSettings(BaseModel):
+    """Laya fast permission pre-classifier — advisory only.
+
+    Laya (https://huggingface.co/convaiinnovations/laya) is a ~421M,
+    non-autoregressive typed-decision model that annotates an ``ASK``-tier
+    shell command with a fast (~33ms) risk read. It never overrides the
+    deterministic permission gate — see ``security/laya_advisor.py``. Requires
+    the ``godspeed[laya]`` extra; silently inert without it regardless of
+    ``enabled``.
+    """
+
+    enabled: bool = False
+    confidence_threshold: float = 0.7
+    timeout_ms: int = 200
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class MetricsExportSettings(BaseModel):
     """OTLP metrics export configuration.
 
@@ -447,6 +465,7 @@ class GodspeedSettings(BaseModel):
     statusline: StatuslineSettings = Field(default_factory=StatuslineSettings)
     batch: BatchSettings = Field(default_factory=BatchSettings)
     metrics_export: MetricsExportSettings = Field(default_factory=MetricsExportSettings)
+    laya: LayaSettings = Field(default_factory=LayaSettings)
 
     @model_validator(mode="after")
     def reconcile_sandbox_modes(self) -> GodspeedSettings:
@@ -1025,6 +1044,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset(
         "statusline",
         "batch",
         "metrics_export",
+        "laya",
     }
 )
 

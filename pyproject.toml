@@ -100,6 +100,12 @@ index = [
 finance = [
     "yfinance>=1.3.0",
 ]
+# Fast permission pre-classifier (security/laya_advisor.py). Advisory only —
+# degrades to "no annotation" without this, never affects the actual
+# permission decision. See LayaSettings in config.py.
+laya = [
+    "laya>=0.3.5",
+]
 
 [project.scripts]
 godspeed = "godspeed.cli:main"
@@ -172,6 +178,7 @@ ignore = ["S603", "S607"]  # subprocess calls are intentional for a coding agent
 "src/godspeed/cli.py" = ["BLE001"]  # CLI catches broad exceptions to prevent crashes
 "src/godspeed/agent/loop.py" = ["BLE001", "ARG001", "ARG002"]  # agent loop callbacks have fixed signatures
 "src/godspeed/context/codebase_index.py" = ["BLE001"]  # ChromaDB integration; broad exception handling
+"src/godspeed/security/laya_advisor.py" = ["BLE001"]  # advisory-only integration; must fail neutral, never raise
 "src/godspeed/memory/store.py" = ["BLE001"]  # ChromaDB integration; broad exception handling
 "src/godspeed/context/coherence_graph.py" = ["BLE001"]  # graph operations; broad exception handling
 "src/godspeed/context/lsp.py" = ["BLE001"]  # LSP subprocess I/O catches broad exceptions
