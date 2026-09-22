@@ -20,6 +20,15 @@ import click
 from godspeed import __version__
 from godspeed._bootstrap import _build_tool_registry, _load_env_files
 from godspeed.config import DEFAULT_GLOBAL_DIR
+from godspeed.tools.tool_sets import VALID_TOOL_SETS
+
+_TOOL_SET_CHOICES = sorted(VALID_TOOL_SETS)
+_TOOL_SET_HELP = (
+    "Restrict the tool surface (default: 'full'). Small/local models often "
+    "pick the wrong tool -- or none at all -- when handed 20+ schemas; "
+    "'local' hides web-facing tools and is the recommended default for "
+    "sub-10B local models."
+)
 
 
 def _force_utf8_stdio() -> None:
@@ -216,6 +225,7 @@ async def _run_app(
     execution_mode: str = "tool",
     continue_session: bool = False,
     resume_session: str | None = None,
+    tool_set: str = "full",
 ) -> None:
     """Wire up all components and launch the Textual TUI."""
     from godspeed.config import GodspeedSettings
@@ -252,7 +262,7 @@ async def _run_app(
             result.incomplete,
         )
 
-    registry, risk_levels = _build_tool_registry()
+    registry, risk_levels = _build_tool_registry(tool_set=tool_set, settings=settings)
 
     from godspeed.tui.textual_app import GodspeedTextualApp
 
@@ -317,6 +327,12 @@ async def _run_app(
     default=None,
     help="Resume a specific session by ID.",
 )
+@click.option(
+    "--tool-set",
+    type=click.Choice(_TOOL_SET_CHOICES),
+    default="full",
+    help=_TOOL_SET_HELP,
+)
 @click.pass_context
 def main(
     ctx: click.Context,
@@ -328,6 +344,7 @@ def main(
     execution_mode: str | None,
     continue_session: bool,
     resume_session: str | None,
+    tool_set: str,
 ) -> None:
     """Godspeed -- Trusted production coding agent."""
     _setup_logging(verbose)
@@ -359,6 +376,7 @@ def main(
                     execution_mode or "tool",
                     continue_session=continue_session,
                     resume_session=resume_session,
+                    tool_set=tool_set,
                 )
             )
 
@@ -534,6 +552,12 @@ def init() -> None:
         "(no compaction, auto-stash, auto-commit, must-fix)."
     ),
 )
+@click.option(
+    "--tool-set",
+    type=click.Choice(_TOOL_SET_CHOICES),
+    default="full",
+    help=_TOOL_SET_HELP,
+)
 def headless_run(
     task: str,
     model: str,
@@ -545,6 +569,7 @@ def headless_run(
     json_output: bool,
     prompt_file: Path | None,
     competition_mode: bool,
+    tool_set: str,
 ) -> None:
     """Run a task non-interactively (headless/CI mode).
 
@@ -595,6 +620,7 @@ def headless_run(
                 timeout,
                 json_output,
                 competition_mode,
+                tool_set=tool_set,
             )
         )
         sys.exit(int(exit_code))
@@ -952,6 +978,7 @@ async def _headless_run(
     timeout: int,
     json_output: bool,
     competition_mode: bool = False,
+    tool_set: str = "full",
 ) -> int:
     """Execute the headless agent loop.
 
@@ -970,7 +997,7 @@ async def _headless_run(
     from godspeed.config import GodspeedSettings
     from godspeed.context.project_instructions import load_project_instructions
     from godspeed.llm.client import LLMClient, ModelRouter
-    from godspeed.security.permissions import ALLOW, PermissionDecision, PermissionEngine
+    from godspeed.security.permissions import ALLOW, DENY, PermissionDecision, PermissionEngine
     from godspeed.tools.base import RiskLevel, ToolContext
 
     overrides: dict = {}
@@ -998,7 +1025,7 @@ async def _headless_run(
     )
 
     # Tools
-    registry, risk_levels = _build_tool_registry()
+    registry, risk_levels = _build_tool_registry(tool_set=tool_set, settings=settings)
 
     # Permission engine with headless auto-approve
     permission_engine = PermissionEngine(
@@ -1024,9 +1051,24 @@ async def _headless_run(
                 return PermissionDecision(ALLOW, "headless: auto-approved (all)")
             if self._level == "reads":
                 tool_risk = risk_levels.get(tool_call.tool_name, RiskLevel.HIGH)
-                if tool_risk == RiskLevel.READ_ONLY:
-                    return PermissionDecision(ALLOW, "headless: auto-approved (reads)")
-                return PermissionDecision(ALLOW, "headless: auto-approved (reads+low)")
+                # "reads" covers READ_ONLY and LOW only. HIGH/DESTRUCTIVE tools
+                # (shell, github, background_check, ...) are meant to require a
+                # human "ask" — headless has no human to ask, so the fail-closed
+                # choice is to deny, not silently allow. Regression guard: this
+                # branch previously fell through to an unconditional ALLOW for
+                # every non-READ_ONLY risk, auto-approving HIGH/DESTRUCTIVE tools
+                # under the default `godspeed run` invocation while mislabeling
+                # the audit record "reads+low".
+                if tool_risk in (RiskLevel.READ_ONLY, RiskLevel.LOW):
+                    return PermissionDecision(
+                        ALLOW, f"headless: auto-approved (reads, risk={tool_risk.value})"
+                    )
+                return PermissionDecision(
+                    DENY,
+                    f"headless: auto-approve level 'reads' does not cover "
+                    f"{tool_risk.value} risk tools -- rerun with --auto-approve all "
+                    "to permit this.",
+                )
             return decision
 
     # Auto-start local inference servers if needed
