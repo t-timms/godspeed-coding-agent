@@ -376,6 +376,7 @@ def main(
                     execution_mode or "tool",
                     continue_session=continue_session,
                     resume_session=resume_session,
+                    tool_set=tool_set,
                 )
             )
 
