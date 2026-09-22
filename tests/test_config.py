@@ -94,6 +94,35 @@ class TestGodspeedSettings:
         assert "FileRead(*.secret)" in s.permissions.deny
         assert s.permissions.ask == ["shell(*)"]
 
+    def test_model_instance_override_preserves_yaml_deny(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """permissions's declared field type is PermissionSettings, so passing
+        an actual instance (not a dict) is equally valid — it must not bypass
+        the merge special-case and wholesale-replace the YAML deny list."""
+        project_dir = tmp_project / ".godspeed"
+        project_dir.mkdir(exist_ok=True)
+        (project_dir / "settings.yaml").write_text(
+            yaml.dump({"permissions": {"deny": ["FileRead(*.secret)"]}})
+        )
+        monkeypatch.setattr("godspeed.config.DEFAULT_GLOBAL_DIR", tmp_project / ".gs-global")
+        monkeypatch.setattr("godspeed.config.DEFAULT_PROJECT_DIR", project_dir)
+
+        s = GodspeedSettings(
+            project_dir=tmp_project,
+            permissions=PermissionSettings(ask=["shell(*)"]),
+        )
+
+        assert "FileRead(*.secret)" in s.permissions.deny
+        assert s.permissions.ask == ["shell(*)"]
+
+    def test_explicit_deny_none_does_not_crash(self, tmp_path: Path) -> None:
+        """An explicit deny=None must be treated as "not specified", same as
+        the top-level convention, not crash on `existing + None`."""
+        s = GodspeedSettings(project_dir=tmp_path, permissions={"ask": ["shell(*)"], "deny": None})
+        assert s.permissions.ask == ["shell(*)"]
+        assert s.permissions.deny  # falls back to the class default, untouched
+
     def test_yaml_project_overrides_global(
         self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
