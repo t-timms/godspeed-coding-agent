@@ -17,6 +17,7 @@ from godspeed.agent.output_styles import BUILT_IN_STYLES, load_custom_styles, re
 from godspeed.config import (
     GodspeedSettings,
     append_permission_rule,
+    load_settings,
     set_output_style,
 )
 from godspeed.observability.metrics import LoopMetrics, Span, SpanStatus
@@ -2207,7 +2208,7 @@ class Commands:
     def _metrics_export(self, endpoint: str) -> CommandResult:
         """Export a synthetic session span via OTLP/HTTP-JSON."""
         if not endpoint:
-            endpoint = GodspeedSettings().metrics_export.endpoint
+            endpoint = load_settings().metrics_export.endpoint
         if not endpoint:
             format_info(
                 "No export endpoint configured. Set metrics_export.endpoint "

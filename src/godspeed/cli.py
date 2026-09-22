@@ -228,7 +228,7 @@ async def _run_app(
     tool_set: str = "full",
 ) -> None:
     """Wire up all components and launch the Textual TUI."""
-    from godspeed.config import GodspeedSettings
+    from godspeed.config import load_settings
 
     overrides: dict = {}
     if model:
@@ -237,7 +237,7 @@ async def _run_app(
         overrides["permission_mode"] = permission_mode
     if execution_mode:
         overrides["execution_mode"] = execution_mode
-    settings = GodspeedSettings(**overrides)
+    settings = load_settings(**overrides)
 
     effective_model = model or settings.model
     effective_project_dir = project_dir.resolve()
@@ -406,12 +406,12 @@ def list_sessions(limit: int) -> None:
     from rich.console import Console as RichConsole
     from rich.table import Table
 
-    from godspeed.config import GodspeedSettings
+    from godspeed.config import load_settings
     from godspeed.memory.session import SessionMemory
     from godspeed.tui.theme import BOLD_PRIMARY, DIM, NEUTRAL, TABLE_BORDER
 
     c = RichConsole()
-    settings = GodspeedSettings()
+    settings = load_settings()
     memory = SessionMemory(db_path=settings.global_dir / "memory.db")
     try:
         sessions = memory.list_sessions(limit=limit)
@@ -709,7 +709,7 @@ def batch_cmd(
         decompose_task,
     )
     from godspeed.agent.result import ExitCode
-    from godspeed.config import GodspeedSettings
+    from godspeed.config import load_settings
     from godspeed.tui.theme import BOLD_PRIMARY, DIM, ERROR, SUCCESS, WARNING
 
     c = RichConsole()
@@ -718,7 +718,7 @@ def batch_cmd(
         sys.stderr.write("Error: No goal provided. Pass a positional argument.\n")
         sys.exit(int(ExitCode.INVALID_INPUT))
 
-    settings = GodspeedSettings(project_dir=project_dir)
+    settings = load_settings(project_dir=project_dir)
 
     effective_units = units if units is not None else settings.batch.parallelism
     if effective_units < MIN_BATCH_UNITS or effective_units > MAX_BATCH_UNITS:
@@ -994,7 +994,7 @@ async def _headless_run(
     from godspeed.agent.result import AgentMetrics, ExitCode, ExitReason
     from godspeed.agent.system_prompt import build_system_prompt
     from godspeed.audit.trail import AuditTrail
-    from godspeed.config import GodspeedSettings
+    from godspeed.config import load_settings
     from godspeed.context.project_instructions import load_project_instructions
     from godspeed.llm.client import LLMClient, ModelRouter
     from godspeed.security.permissions import ALLOW, DENY, PermissionDecision, PermissionEngine
@@ -1003,7 +1003,7 @@ async def _headless_run(
     overrides: dict = {}
     if model:
         overrides["model"] = model
-    settings = GodspeedSettings(**overrides)
+    settings = load_settings(**overrides)
 
     effective_model = model or settings.model
     effective_project_dir = project_dir.resolve()
@@ -1744,10 +1744,10 @@ def doctor(fix: bool) -> None:
         all_ok = False
 
     # ── 4. Permission mode sanity ──────────────────────────────────────
-    from godspeed.config import GodspeedSettings
+    from godspeed.config import load_settings
 
     try:
-        settings = GodspeedSettings()
+        settings = load_settings()
         mode = settings.permission_mode
         if mode == "yolo":
             table.add_row(

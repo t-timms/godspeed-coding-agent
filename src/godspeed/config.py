@@ -1,16 +1,25 @@
-"""Configuration with pydantic-settings. Supports env vars, .env, and YAML config files."""
+"""Configuration on plain pydantic models. Supports env vars, .env, and YAML config files.
+
+Deliberately does NOT use pydantic-settings: that package imports its full
+settings-source machinery (AWS/GCP/Azure secrets, TOML/JSON/CLI sources, ...)
+unconditionally at import time — ~950ms — even though Godspeed only ever used
+env-var-with-prefix reading (dotenv is already handled separately by
+``_bootstrap._load_env_files``). ``load_settings()`` below replicates just
+that one behavior directly.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections import OrderedDict
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
-from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +157,7 @@ def get_model_context_window(model: str) -> int:
 DEFAULT_PROJECT_DIR = Path(".godspeed")
 
 
-class PermissionSettings(BaseSettings):
+class PermissionSettings(BaseModel):
     """Permission rules configuration."""
 
     deny: list[str] = Field(
@@ -193,19 +202,19 @@ class PermissionSettings(BaseSettings):
     )
     ask: list[str] = Field(default_factory=lambda: ["shell(*)"])
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class AuditSettings(BaseSettings):
+class AuditSettings(BaseModel):
     """Audit trail configuration."""
 
     enabled: bool = True
     retention_days: int = 30
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class ContextSettings(BaseSettings):
+class ContextSettings(BaseModel):
     """Context management configuration."""
 
     project_instructions: str = "GODSPEED.md"
@@ -220,10 +229,10 @@ class ContextSettings(BaseSettings):
         ]
     )
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class SandboxSettings(BaseSettings):
+class SandboxSettings(BaseModel):
     """Sandboxing configuration for tool execution.
 
     ``mode`` selects the sandboxing strategy: ``none`` (no sandbox),
@@ -252,10 +261,10 @@ class SandboxSettings(BaseSettings):
     blocked_paths: list[str] = Field(default_factory=list)
     writable_paths: list[str] = Field(default_factory=list)
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class StatuslineSettings(BaseSettings):
+class StatuslineSettings(BaseModel):
     """Statusline (per-turn HUD) configuration.
 
     When ``enabled`` and a ``template`` is set, the HUD renders the template
@@ -267,10 +276,10 @@ class StatuslineSettings(BaseSettings):
     enabled: bool = False
     template: str = ""
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class BatchSettings(BaseSettings):
+class BatchSettings(BaseModel):
     """Batch execution configuration for ``/batch`` and ``godspeed batch``.
 
     Controls default parallelism, PR creation, and worktree location for
@@ -281,10 +290,10 @@ class BatchSettings(BaseSettings):
     open_pr: bool = False
     worktree_dir: str = ""
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class MetricsExportSettings(BaseSettings):
+class MetricsExportSettings(BaseModel):
     """OTLP metrics export configuration.
 
     ``endpoint`` is the base OTLP/HTTP collector URL (e.g.
@@ -294,10 +303,10 @@ class MetricsExportSettings(BaseSettings):
 
     endpoint: str = ""
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore")
 
 
-class GodspeedSettings(BaseSettings):
+class GodspeedSettings(BaseModel):
     """Root configuration for Godspeed."""
 
     # Model presets for speed + quality balance.
@@ -509,12 +518,10 @@ class GodspeedSettings(BaseSettings):
             raise ValueError(msg)
         return v
 
-    model_config = SettingsConfigDict(
-        env_prefix="GODSPEED_",
-        env_file=".env",
-        env_nested_delimiter="__",
-        extra="ignore",
-    )
+    # Env-var overrides (GODSPEED_* prefix, "__" nested delimiter) are applied
+    # by ``load_settings()`` below, not by this model itself — see that
+    # function's docstring for why GodspeedSettings dropped pydantic-settings.
+    model_config = ConfigDict(extra="ignore")
 
     @field_validator("compaction_threshold")
     @classmethod
@@ -657,6 +664,68 @@ class GodspeedSettings(BaseSettings):
         # Env vars / constructor args take final precedence
         merged.update({k: v for k, v in data.items() if v is not None})
         return merged
+
+
+_ENV_PREFIX = "GODSPEED_"
+_ENV_NESTED_DELIMITER = "__"
+
+
+def load_settings(**overrides: Any) -> GodspeedSettings:
+    """Construct ``GodspeedSettings`` with ``GODSPEED_*`` env vars applied.
+
+    Replaces what pydantic-settings' ``BaseSettings`` used to do
+    automatically. Precedence, matching the old behavior: YAML (handled by
+    ``GodspeedSettings.load_yaml_configs``) < env vars < explicit *overrides*.
+    Nested settings use ``__`` as a delimiter (e.g. ``GODSPEED_PERMISSIONS__DENY``).
+    """
+    env_overrides = _read_env_overrides()
+    merged = _deep_merge(env_overrides, overrides)
+    return GodspeedSettings(**merged)
+
+
+def _read_env_overrides() -> dict[str, Any]:
+    """Read ``GODSPEED_*`` env vars into a nested override dict."""
+    result: dict[str, Any] = {}
+    prefix_len = len(_ENV_PREFIX)
+    for key, raw_value in os.environ.items():
+        if not key.startswith(_ENV_PREFIX):
+            continue
+        path = key[prefix_len:].lower().split(_ENV_NESTED_DELIMITER)
+        _set_nested(result, path, _coerce_env_value(raw_value))
+    return result
+
+
+def _coerce_env_value(value: str) -> Any:
+    """Best-effort JSON-decode values destined for list/dict fields.
+
+    Scalar coercion (bool/int/float strings) is handled by pydantic itself
+    during validation — this only needs to turn a JSON-looking string into an
+    actual list/dict for fields like ``fallback_models`` or ``routing``.
+    """
+    stripped = value.strip()
+    if stripped[:1] in "[{":
+        try:
+            return json.loads(stripped)
+        except (ValueError, TypeError):
+            pass
+    return value
+
+
+def _set_nested(target: dict[str, Any], path: list[str], value: Any) -> None:
+    for part in path[:-1]:
+        target = target.setdefault(part, {})
+    target[path[-1]] = value
+
+
+def _deep_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """Merge *overrides* onto *base*, recursing into nested dicts. *overrides* wins."""
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def append_permission_rule(

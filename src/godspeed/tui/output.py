@@ -141,9 +141,9 @@ def _configured_statusline_template() -> str | None:
     template, and None when statusline is disabled.
     """
     try:
-        from godspeed.config import GodspeedSettings
+        from godspeed.config import load_settings
 
-        statusline = GodspeedSettings().statusline
+        statusline = load_settings().statusline
     except Exception:
         return None
     if not statusline.enabled:

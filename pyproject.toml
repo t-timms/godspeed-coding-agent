@@ -40,7 +40,6 @@ dependencies = [
     # source build fails); 1.91.3 is the last pure-Python release.
     "litellm>=1.84.0,<1.102",
     "pydantic>=2.12.5,<3.0",
-    "pydantic-settings>=2.14.2,<3.0",
     "click>=8.1.0,<9.0",
     "rich>=15.0.0,<16.0",
     "prompt-toolkit>=3.0.52,<4.0",
@@ -62,7 +61,6 @@ dependencies = [
     # python-dotenv==1.0.1 strictly, making a pin-up unsatisfiable. CI's
     # pip-audit call suppresses this one CVE via --ignore-vuln below. We'll
     # remove the suppression when litellm relaxes its bound.
-    "yfinance>=1.3.0",
     "readability-lxml>=0.8.4.1",
     # Transitive pin-up: lxml-html-clean is pulled in via readability-lxml;
     # < 0.4.5 has PYSEC-2026-2614.
@@ -96,6 +94,11 @@ context = [
 mcp = []
 index = [
     "chromadb>=1.5.8,<2.0",
+]
+# StockPriceTool degrades gracefully without this (see _bootstrap.py's
+# try/except around registering it, and stock_price.py's own lazy import).
+finance = [
+    "yfinance>=1.3.0",
 ]
 
 [project.scripts]
