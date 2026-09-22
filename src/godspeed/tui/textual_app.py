@@ -657,8 +657,6 @@ class _InteractivePermissionProxy:
             return decision
 
         try:
-            import asyncio
-
             from godspeed.config import load_settings
             from godspeed.security.laya_advisor import annotate_ask_decision
 
