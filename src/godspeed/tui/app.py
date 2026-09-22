@@ -1053,6 +1053,14 @@ class _InteractivePermissionProxy:
         if decision != ASK:
             return decision
 
+        try:
+            from godspeed.config import load_settings
+            from godspeed.security.laya_advisor import annotate_ask_decision
+
+            decision = annotate_ask_decision(decision, tool_call, load_settings().laya)
+        except Exception:
+            logger.warning("Laya advisory failed — continuing without it", exc_info=True)
+
         # Show the permission prompt with contextual detail
         args = getattr(tool_call, "arguments", None) or {}
         format_permission_prompt(tool_call.tool_name, decision.reason, arguments=args)

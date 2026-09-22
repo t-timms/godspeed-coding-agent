@@ -18,6 +18,7 @@ from godspeed.config import (
     append_allow_rule,
     append_permission_rule,
     get_model_context_window,
+    load_settings,
 )
 
 
@@ -40,7 +41,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_project, monkeypatch)
         monkeypatch.setenv("GODSPEED_MODEL", "gpt-4o")
         monkeypatch.setenv("GODSPEED_PERMISSION_MODE", "strict")
-        s = GodspeedSettings(project_dir=tmp_project)
+        s = load_settings(project_dir=tmp_project)
         assert s.model == "gpt-4o"
         assert s.permission_mode == "strict"
 
@@ -77,7 +78,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_PERMISSION_MODE", "unsafe")
         with pytest.raises(ValueError, match="permission_mode must be one of"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_model_raises_on_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_dirs(tmp_path, monkeypatch)
@@ -90,7 +91,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_SANDBOX", "virtualbox")
         with pytest.raises(ValueError, match="sandbox must be one of"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_execution_mode_raises_on_invalid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -98,7 +99,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_EXECUTION_MODE", "autonomous")
         with pytest.raises(ValueError, match="execution_mode must be one of"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_auto_fix_retries_raises_on_negative(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -106,7 +107,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_AUTO_FIX_RETRIES", "-1")
         with pytest.raises(ValueError, match="auto_fix_retries must be >= 0"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_thinking_budget_raises_on_negative(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -114,7 +115,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_THINKING_BUDGET", "-5")
         with pytest.raises(ValueError, match="thinking_budget must be >= 0"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_max_cost_usd_raises_on_negative(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -122,7 +123,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_MAX_COST_USD", "-0.01")
         with pytest.raises(ValueError, match="max_cost_usd must be >= 0"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_auto_commit_threshold_raises_on_lt_1(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -130,7 +131,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_AUTO_COMMIT_THRESHOLD", "0")
         with pytest.raises(ValueError, match="auto_commit_threshold must be >= 1"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_compaction_threshold_raises_on_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -138,7 +139,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_COMPACTION_THRESHOLD", "0")
         with pytest.raises(ValueError, match="compaction_threshold must be between 0 and 1"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     def test_max_context_tokens_raises_on_lt_1000(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -146,7 +147,7 @@ class TestGodspeedSettings:
         _patch_dirs(tmp_path, monkeypatch)
         monkeypatch.setenv("GODSPEED_MAX_CONTEXT_TOKENS", "500")
         with pytest.raises(ValueError, match="max_context_tokens must be at least 1000"):
-            GodspeedSettings(project_dir=tmp_path)
+            load_settings(project_dir=tmp_path)
 
     # ── collection validation (hooks / mcp_servers / routing) ──
 

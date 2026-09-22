@@ -656,6 +656,25 @@ class _InteractivePermissionProxy:
         if decision != ASK:
             return decision
 
+        try:
+            import asyncio
+
+            from godspeed.config import load_settings
+            from godspeed.security.laya_advisor import annotate_ask_decision
+
+            def _annotate() -> PermissionDecision:
+                # load_settings() does env-var scanning plus YAML stat/read;
+                # annotate_ask_decision's Laya call blocks on a thread-pool
+                # .result(). Both run inside this one to_thread call so
+                # neither ever stalls the Textual event loop — calling
+                # load_settings() as an argument expression above would
+                # evaluate it on the event loop before to_thread even starts.
+                return annotate_ask_decision(decision, tool_call, load_settings().laya)
+
+            decision = await asyncio.to_thread(_annotate)
+        except Exception:
+            logger.warning("Laya advisory failed — continuing without it", exc_info=True)
+
         args = getattr(tool_call, "arguments", None) or {}
         from godspeed.security.permissions import approval_fingerprint
         from godspeed.tui.screens.permission_dialog import PermissionDialog

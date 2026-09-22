@@ -27,9 +27,16 @@ logger = logging.getLogger(__name__)
 class PermissionDecision:
     """Result of a permission evaluation."""
 
-    def __init__(self, action: str, reason: str = "") -> None:
+    def __init__(
+        self, action: str, reason: str = "", metadata: dict[str, object] | None = None
+    ) -> None:
         self.action = action
         self.reason = reason
+        # Purely additive, read-only context (e.g. a Laya advisory) attached
+        # after the decision is made — never consulted by evaluate() itself.
+        # __eq__ below still only compares .action, so nothing that does
+        # `decision == "ask"` is affected by what's in here.
+        self.metadata = metadata or {}
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, str):

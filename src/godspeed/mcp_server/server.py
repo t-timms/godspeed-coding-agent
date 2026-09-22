@@ -20,7 +20,7 @@ from mcp.server.stdio import stdio_server
 
 from godspeed._bootstrap import _build_tool_registry, _load_env_files
 from godspeed.audit.trail import AuditTrail
-from godspeed.config import GodspeedSettings
+from godspeed.config import GodspeedSettings, load_settings
 from godspeed.mcp_server.schemas import build_mcp_tools
 from godspeed.security.permissions import ALLOW, PermissionEngine
 from godspeed.security.secrets import redact_secrets
@@ -34,11 +34,11 @@ def _load_settings_with_optional_config(config_path: Path | None) -> GodspeedSet
     """Load settings using standard CLI behavior, with optional file override."""
     _load_env_files(project_dir=Path("."))
     if config_path is None:
-        return GodspeedSettings()
+        return load_settings()
     config_data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     if not isinstance(config_data, dict):
         config_data = {}
-    return GodspeedSettings(**config_data)
+    return load_settings(**config_data)
 
 
 def _extract_caller(arguments: dict[str, Any] | None) -> str:
