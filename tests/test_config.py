@@ -56,6 +56,44 @@ class TestGodspeedSettings:
         assert s.model == "ollama/llama3"
         assert s.permission_mode == "strict"
 
+    def test_env_override_of_sibling_key_preserves_yaml_deny(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A GODSPEED_PERMISSIONS__ASK override must not wipe out a
+        YAML-defined permissions.deny — regression test for a shallow-merge
+        bug where the final data-over-YAML step used dict.update() instead
+        of the same nested merge used for project-over-global YAML."""
+        project_dir = tmp_project / ".godspeed"
+        project_dir.mkdir(exist_ok=True)
+        (project_dir / "settings.yaml").write_text(
+            yaml.dump({"permissions": {"deny": ["FileRead(*.secret)"]}})
+        )
+        monkeypatch.setattr("godspeed.config.DEFAULT_GLOBAL_DIR", tmp_project / ".gs-global")
+        monkeypatch.setattr("godspeed.config.DEFAULT_PROJECT_DIR", project_dir)
+        monkeypatch.setenv("GODSPEED_PERMISSIONS__ASK", '["shell(*)", "custom(*)"]')
+
+        s = load_settings(project_dir=tmp_project)
+
+        assert "FileRead(*.secret)" in s.permissions.deny
+        assert s.permissions.ask == ["shell(*)", "custom(*)"]
+
+    def test_explicit_override_of_sibling_key_preserves_yaml_deny(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Same protection for an explicit constructor kwarg, not just env vars."""
+        project_dir = tmp_project / ".godspeed"
+        project_dir.mkdir(exist_ok=True)
+        (project_dir / "settings.yaml").write_text(
+            yaml.dump({"permissions": {"deny": ["FileRead(*.secret)"]}})
+        )
+        monkeypatch.setattr("godspeed.config.DEFAULT_GLOBAL_DIR", tmp_project / ".gs-global")
+        monkeypatch.setattr("godspeed.config.DEFAULT_PROJECT_DIR", project_dir)
+
+        s = GodspeedSettings(project_dir=tmp_project, permissions={"ask": ["shell(*)"]})
+
+        assert "FileRead(*.secret)" in s.permissions.deny
+        assert s.permissions.ask == ["shell(*)"]
+
     def test_yaml_project_overrides_global(
         self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

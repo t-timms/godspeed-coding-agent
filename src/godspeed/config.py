@@ -680,8 +680,15 @@ class GodspeedSettings(BaseModel):
         # Warn on unknown top-level keys (typos / newer configs)
         _warn_unknown_keys(merged)
 
-        # Env vars / constructor args take final precedence
-        merged.update({k: v for k, v in data.items() if v is not None})
+        # Env vars / constructor args take final precedence, but must not
+        # silently drop sibling YAML keys in the same nested block — e.g. a
+        # GODSPEED_PERMISSIONS__ASK override should not wipe out a
+        # YAML-defined permissions.deny. A plain dict.update() here would
+        # replace the whole "permissions" sub-dict with whatever partial one
+        # `data` carries. Reuse the same nested-merge semantics already used
+        # for project-over-global YAML above (and its deny-is-additive
+        # invariant) instead of a shallow update.
+        _merge_configs(merged, {k: v for k, v in data.items() if v is not None})
         return merged
 
 
