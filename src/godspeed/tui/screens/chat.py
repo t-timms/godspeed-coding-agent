@@ -12,6 +12,7 @@ from textual.containers import Horizontal
 from textual.screen import Screen
 from textual.widgets import DirectoryTree, Footer, Input
 
+from godspeed.config import load_settings
 from godspeed.tui.commands import Commands
 from godspeed.tui.theme import (
     BOLD_PRIMARY,
@@ -343,6 +344,7 @@ class ChatScreen(Screen):
                 task_store=getattr(self._commands, "_task_store", None),
                 session_id=self._session_id,
                 durability=True,
+                laya_settings=load_settings().laya,
             )
             chat_log.end_turn()
             chat_log.write()

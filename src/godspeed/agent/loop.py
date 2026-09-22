@@ -16,7 +16,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from godspeed.agent.completion_gate import (
     CompletionGateState,
@@ -30,13 +30,16 @@ from godspeed.agent.session_lease import SessionLease
 from godspeed.agent.turn_journal import TurnJournal, request_fingerprint
 from godspeed.hooks import HookEvent
 from godspeed.llm.client import ChatResponse, LLMClient
-from godspeed.llm.router import classify_task_type
+from godspeed.llm.router import classify_task_type, maybe_escalate_task_type
 from godspeed.observability.metrics import LoopMetrics, MetricsSink
 from godspeed.security.dangerous import detect_dangerous_command
 from godspeed.security.secrets import detect_secrets
 from godspeed.tools.base import ToolCall, ToolContext, ToolResult
 from godspeed.tools.registry import ToolRegistry
 from godspeed.tools.tasks import build_continuation_nudge
+
+if TYPE_CHECKING:
+    from godspeed.config import LayaSettings
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +201,7 @@ async def agent_loop(
     completion_gate: bool = False,
     session_id: str | None = None,
     durability: bool = False,
+    laya_settings: LayaSettings | None = None,
 ) -> str:
     """Run the agent loop until the model stops calling tools.
 
@@ -237,6 +241,10 @@ async def agent_loop(
             (default). Falls back to sequential when False or for single calls.
         task_store: Optional TaskStore whose open tasks drive a continuation
             nudge injected into the model's context before each LLM call.
+        laya_settings: Optional Laya settings enabling task-type routing
+            escalation (see ``llm.router.maybe_escalate_task_type``). Unset
+            or disabled means routing behaves exactly as before this option
+            existed — escalation is opt-in and fails neutral.
 
     Returns:
         The final assistant text response.
@@ -338,6 +346,7 @@ async def agent_loop(
         # plan/edit/read/shell. The router translates that to a model
         # via settings.routing (or the cheap_model/strong_model shortcuts).
         task_type = classify_task_type(conversation.messages)
+        task_type = maybe_escalate_task_type(task_type, conversation.messages, laya_settings)
 
         # Continuation nudge: if the task store has open tasks, remind the
         # model to keep working through them before it decides to stop.

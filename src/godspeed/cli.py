@@ -1158,6 +1158,7 @@ async def _headless_run(
         max_iterations=max_iterations,
         metrics=metrics,
         competition_mode=competition_mode,
+        laya_settings=settings.laya,
     )
     try:
         if timeout > 0:

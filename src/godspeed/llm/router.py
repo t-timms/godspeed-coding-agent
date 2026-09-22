@@ -16,8 +16,14 @@ model is *most likely* about to do next based on what it just did.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
+
+if TYPE_CHECKING:
+    from godspeed.config import LayaSettings
+
+logger = logging.getLogger(__name__)
 
 # Canonical task-type strings used as routing keys throughout Godspeed.
 # Kept as module constants so callers don't sprinkle string literals.
@@ -152,3 +158,95 @@ def classify_task_type(messages: Sequence[dict[str, Any]]) -> str:
     if all(t in _READ_TOOLS for t in tools):
         return TASK_READ
     return TASK_PLAN
+
+
+# task_types classify_task_type can hand back that Laya is allowed to
+# escalate away from. plan/architect/compaction are already the top of the
+# ladder — nothing to escalate to, and skipping them avoids paying for a
+# Laya call on requests that don't need one.
+_ESCALATABLE_TASK_TYPES: Final[frozenset[str]] = frozenset({TASK_EDIT, TASK_READ, TASK_SHELL})
+
+
+def _last_user_text(messages: Sequence[dict[str, Any]]) -> str:
+    """Plain text of the most recent user-role message, or ``""``.
+
+    Mirrors the block-extraction pattern in ``llm/client.py``'s response
+    parsing: ``content`` is either a plain string or a list of content
+    blocks (e.g. text + image, OpenAI multimodal format) — only the text
+    blocks matter for a difficulty read.
+    """
+    for msg in reversed(messages):
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text = ""
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text += block.get("text", "")
+            return text
+        return ""
+    return ""
+
+
+def maybe_escalate_task_type(
+    task_type: str, messages: Sequence[dict[str, Any]], laya_settings: LayaSettings | None
+) -> str:
+    """Escalate *task_type* toward ``"plan"`` if Laya judges the request
+    harder than ``classify_task_type``'s tool-based bucketing assumed.
+
+    ``classify_task_type`` looks *backward* — what tools did the last
+    assistant turn call — which says nothing about how hard the user's
+    actual request is. Laya's ``router_questions()`` preset reads the
+    request itself, prospectively, so the two signals are complementary
+    rather than redundant.
+
+    Escalate-only, mirroring ``security/laya_advisor.py``'s "advisory adds
+    caution, never removes it" principle: this can only move *task_type*
+    toward the strong-model tier, never away from it. Fails neutral — a
+    disabled/unset ``laya_settings``, an already-strong task_type, or any
+    Laya error/timeout/absence all return *task_type* unchanged, and in the
+    already-strong case Laya isn't even called.
+    """
+    if laya_settings is None or not laya_settings.enabled:
+        return task_type
+    if task_type not in _ESCALATABLE_TASK_TYPES:
+        return task_type
+
+    request_text = _last_user_text(messages)
+    if not request_text:
+        return task_type
+
+    from godspeed.security.laya_advisor import LayaAdvisor, _is_laya_available
+
+    if not _is_laya_available():
+        return task_type
+
+    try:
+        import laya
+
+        router_questions = laya.router_questions()
+    except Exception:
+        logger.warning("Laya router_questions() unavailable — routing unchanged", exc_info=True)
+        return task_type
+
+    result = LayaAdvisor.get().ask(
+        {"request": request_text},
+        router_questions,
+        timeout_ms=laya_settings.timeout_ms,
+    )
+    if result is None:
+        return task_type
+
+    answers = result.get("answers", {}) if isinstance(result, dict) else {}
+    difficulty_answer = answers.get("difficulty", {})
+    score = difficulty_answer.get("score") if isinstance(difficulty_answer, dict) else None
+    if not isinstance(score, int | float):
+        return task_type
+
+    if score >= laya_settings.difficulty_escalate_threshold:
+        logger.info("Laya escalated task_type %s -> plan (score=%.2f)", task_type, score)
+        return TASK_PLAN
+    return task_type

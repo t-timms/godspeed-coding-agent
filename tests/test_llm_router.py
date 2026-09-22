@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import logging
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from godspeed.config import GodspeedSettings
+from godspeed.config import GodspeedSettings, LayaSettings
 from godspeed.llm.client import ChatResponse, LLMClient, ModelRouter
 from godspeed.llm.router import (
     TASK_ARCHITECT,
@@ -17,7 +19,9 @@ from godspeed.llm.router import (
     TASK_SHELL,
     TASK_TYPES,
     classify_task_type,
+    maybe_escalate_task_type,
 )
+from godspeed.security.laya_advisor import LayaAdvisor
 
 
 @pytest.fixture(autouse=True)
@@ -369,3 +373,176 @@ class TestRoutingEndToEnd:
         call_kwargs = mock_fallback.call_args
         assert call_kwargs.kwargs.get("_model") == "claude-sonnet-4"
         assert client.model == "ollama/qwen3:4b"
+
+
+def _fake_laya_module(router_questions: dict[str, object] | None = None) -> MagicMock:
+    fake = MagicMock()
+    fake.router_questions.return_value = router_questions or {"difficulty": {"type": "score"}}
+    return fake
+
+
+class TestMaybeEscalateTaskType:
+    """Laya-powered routing escalation. Same design contract as the
+    permission advisor (security/laya_advisor.py): escalate-only, never
+    downgrades, fails neutral on any Laya absence/error/timeout. A
+    hand-labeled validation run found real difficulty scores compress
+    toward the middle of the 0-3 scale (see LayaSettings docstring), so the
+    escalate threshold used in these tests (1.5) is the actual shipped
+    default, not an arbitrary test value.
+    """
+
+    def test_none_settings_unchanged(self) -> None:
+        result = maybe_escalate_task_type(TASK_EDIT, [_user("do something hard")], None)
+        assert result == TASK_EDIT
+
+    def test_disabled_settings_unchanged_and_laya_not_called(self) -> None:
+        with patch.object(LayaAdvisor, "get") as mock_get:
+            result = maybe_escalate_task_type(
+                TASK_EDIT, [_user("do something hard")], LayaSettings(enabled=False)
+            )
+        assert result == TASK_EDIT
+        mock_get.assert_not_called()
+
+    @pytest.mark.parametrize("task_type", [TASK_PLAN, TASK_ARCHITECT, TASK_COMPACTION])
+    def test_already_strong_task_type_unchanged_and_laya_not_called(self, task_type: str) -> None:
+        with patch.object(LayaAdvisor, "get") as mock_get:
+            result = maybe_escalate_task_type(
+                task_type, [_user("do something hard")], LayaSettings(enabled=True)
+            )
+        assert result == task_type
+        mock_get.assert_not_called()
+
+    def test_no_user_message_unchanged_and_laya_not_called(self) -> None:
+        msgs = [_assistant("file_read"), _tool_result()]
+        with patch.object(LayaAdvisor, "get") as mock_get:
+            result = maybe_escalate_task_type(TASK_EDIT, msgs, LayaSettings(enabled=True))
+        assert result == TASK_EDIT
+        mock_get.assert_not_called()
+
+    def test_laya_unavailable_unchanged(self) -> None:
+        with patch("godspeed.security.laya_advisor._is_laya_available", return_value=False):
+            result = maybe_escalate_task_type(
+                TASK_EDIT, [_user("hard task")], LayaSettings(enabled=True)
+            )
+        assert result == TASK_EDIT
+
+    def test_ask_returns_none_unchanged(self) -> None:
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = None
+            result = maybe_escalate_task_type(
+                TASK_EDIT, [_user("hard task")], LayaSettings(enabled=True)
+            )
+        assert result == TASK_EDIT
+
+    def test_score_below_threshold_unchanged(self) -> None:
+        settings = LayaSettings(enabled=True, difficulty_escalate_threshold=1.5)
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {
+                "answers": {"difficulty": {"type": "score", "score": 1.2, "confidence": 0.5}}
+            }
+            result = maybe_escalate_task_type(TASK_EDIT, [_user("trivial task")], settings)
+        assert result == TASK_EDIT
+
+    def test_score_at_threshold_escalates_to_plan(self, caplog: pytest.LogCaptureFixture) -> None:
+        settings = LayaSettings(enabled=True, difficulty_escalate_threshold=1.5)
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {
+                "answers": {"difficulty": {"type": "score", "score": 1.5, "confidence": 0.5}}
+            }
+            with caplog.at_level(logging.INFO):
+                result = maybe_escalate_task_type(TASK_READ, [_user("hard task")], settings)
+        assert result == TASK_PLAN
+        assert "escalated" in caplog.text
+
+    def test_score_above_threshold_escalates_to_plan(self) -> None:
+        settings = LayaSettings(enabled=True, difficulty_escalate_threshold=1.5)
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {
+                "answers": {"difficulty": {"type": "score", "score": 2.8, "confidence": 0.9}}
+            }
+            result = maybe_escalate_task_type(TASK_SHELL, [_user("refactor everything")], settings)
+        assert result == TASK_PLAN
+
+    def test_malformed_score_unchanged(self) -> None:
+        settings = LayaSettings(enabled=True)
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {"answers": {}}
+            result = maybe_escalate_task_type(TASK_EDIT, [_user("task")], settings)
+        assert result == TASK_EDIT
+
+    def test_router_questions_raises_unchanged(self) -> None:
+        broken_laya = MagicMock()
+        broken_laya.router_questions.side_effect = RuntimeError("boom")
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": broken_laya}),
+        ):
+            result = maybe_escalate_task_type(
+                TASK_EDIT, [_user("task")], LayaSettings(enabled=True)
+            )
+        assert result == TASK_EDIT
+
+    def test_uses_last_user_message_text_from_content_blocks(self) -> None:
+        # Multimodal content: list of blocks — only text blocks contribute.
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "refactor the entire auth system"},
+                    {"type": "image", "source": "..."},
+                ],
+            }
+        ]
+        settings = LayaSettings(enabled=True, difficulty_escalate_threshold=1.5)
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {
+                "answers": {"difficulty": {"type": "score", "score": 2.0}}
+            }
+            result = maybe_escalate_task_type(TASK_EDIT, msgs, settings)
+        assert result == TASK_PLAN
+        call_args = mock_get.return_value.ask.call_args
+        assert call_args[0][0] == {"request": "refactor the entire auth system"}
+
+    def test_uses_most_recent_user_message(self) -> None:
+        msgs = [
+            _user("first, trivial request"),
+            _assistant("file_read"),
+            _tool_result(),
+            _user("second, hard request"),
+        ]
+        settings = LayaSettings(enabled=True)
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {
+                "answers": {"difficulty": {"type": "score", "score": 0.0}}
+            }
+            maybe_escalate_task_type(TASK_READ, msgs, settings)
+        call_args = mock_get.return_value.ask.call_args
+        assert call_args[0][0] == {"request": "second, hard request"}

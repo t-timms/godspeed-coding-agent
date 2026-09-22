@@ -71,44 +71,25 @@ class TestAnnotateAskDecisionFailsNeutral:
             result = annotate_ask_decision(decision, _shell_call(), LayaSettings(enabled=True))
         assert result is decision
 
-    def test_below_confidence_threshold_returns_same_object(self) -> None:
-        decision = _ask_decision()
-        advisory = LayaAdvisory(
-            risk_category="moderate",
-            risk_category_confidence=0.3,
-            is_destructive=0.4,
-            raw={},
-        )
-        with (
-            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
-            patch.object(LayaAdvisor, "get") as mock_get,
-        ):
-            mock_get.return_value.get_advisory.return_value = advisory
-            result = annotate_ask_decision(
-                decision, _shell_call(), LayaSettings(enabled=True, confidence_threshold=0.7)
-            )
-        assert result is decision
-
 
 class TestAnnotateAskDecisionAttachesAdvisory:
-    """The one success path — action must stay ASK, only reason/metadata change."""
+    """The one success path — action must stay ASK, only reason/metadata change.
+
+    No confidence gating: a validation run against the real checkpoint found
+    confidence never approached the old 0.7 default (highest observed 0.64
+    across 40 cases), so annotate_ask_decision always attaches the advisory
+    when Laya succeeds rather than hard-gating on an unvalidated threshold.
+    """
 
     def test_annotation_never_changes_action(self) -> None:
         decision = _ask_decision("matches ask rule: shell(*)")
-        advisory = LayaAdvisory(
-            risk_category="destructive",
-            risk_category_confidence=0.92,
-            is_destructive=0.88,
-            raw={"answers": {}},
-        )
+        advisory = LayaAdvisory(is_destructive=0.88, raw={"answers": {}})
         with (
             patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
             patch.object(LayaAdvisor, "get") as mock_get,
         ):
             mock_get.return_value.get_advisory.return_value = advisory
-            result = annotate_ask_decision(
-                decision, _shell_call(), LayaSettings(enabled=True, confidence_threshold=0.7)
-            )
+            result = annotate_ask_decision(decision, _shell_call(), LayaSettings(enabled=True))
         assert result.action == ASK
         assert result == decision  # __eq__ compares .action only, still ASK
         assert "destructive" in result.reason
@@ -146,3 +127,80 @@ class TestLayaAdvisorTimeout:
             result = advisor.get_advisory("ls", [], timeout_ms=200)
         assert result is None
         assert advisor._agent_load_failed is True
+
+
+class TestAsk:
+    """The generic ask() method — shared by get_advisory and (eventually)
+    task-type routing. Same fail-neutral/timeout contract as get_advisory,
+    tested once here directly rather than only indirectly through it."""
+
+    def test_returns_raw_predict_result(self) -> None:
+        advisor = LayaAdvisor()
+        agent = MagicMock()
+        agent.predict.return_value = {"answers": {"foo": {"type": "noul", "noul": 0.5}}}
+        advisor._agent = agent
+        result = advisor.ask({"request": "hi"}, {"foo": {"type": "noul"}})
+        assert result == {"answers": {"foo": {"type": "noul", "noul": 0.5}}}
+
+    def test_non_dict_predict_result_becomes_empty_dict(self) -> None:
+        advisor = LayaAdvisor()
+        agent = MagicMock()
+        agent.predict.return_value = "not a dict"
+        advisor._agent = agent
+        result = advisor.ask({"request": "hi"}, {"foo": {"type": "noul"}})
+        assert result == {}
+
+    def test_timeout_returns_none(self) -> None:
+        advisor = LayaAdvisor()
+        agent = MagicMock()
+        agent.predict.side_effect = lambda *_a, **_kw: time.sleep(2)
+        advisor._agent = agent
+        result = advisor.ask({"request": "hi"}, {"foo": {"type": "noul"}}, timeout_ms=50)
+        assert result is None
+
+    def test_agent_unavailable_returns_none(self) -> None:
+        advisor = LayaAdvisor()
+        advisor._agent_load_failed = True
+        result = advisor.ask({"request": "hi"}, {"foo": {"type": "noul"}})
+        assert result is None
+
+
+class TestGetAdvisoryParsing:
+    """Regression guard for get_advisory's response parsing, using response
+    shapes matching the real checkpoint's actual output format (verified via
+    a live inference call this session) — not the model's real accuracy,
+    which needs the real network-downloaded checkpoint and isn't something a
+    fast unit test should depend on."""
+
+    def test_high_destructive_probability_parsed_correctly(self) -> None:
+        """Shape matches a real `rm -rf /` response: is_destructive.noul high."""
+        advisor = LayaAdvisor()
+        agent = MagicMock()
+        agent.predict.return_value = {
+            "answers": {"is_destructive": {"type": "noul", "noul": 0.87, "confidence": 0.61}}
+        }
+        advisor._agent = agent
+        advisory = advisor.get_advisory("rm -rf /", [])
+        assert advisory is not None
+        assert advisory.is_destructive == 0.87
+
+    def test_low_destructive_probability_parsed_correctly(self) -> None:
+        """Shape matches a real `ls -la` response: is_destructive.noul low."""
+        advisor = LayaAdvisor()
+        agent = MagicMock()
+        agent.predict.return_value = {
+            "answers": {"is_destructive": {"type": "noul", "noul": 0.18, "confidence": 0.17}}
+        }
+        advisor._agent = agent
+        advisory = advisor.get_advisory("ls -la", [])
+        assert advisory is not None
+        assert advisory.is_destructive == 0.18
+
+    def test_missing_answers_key_defaults_to_zero(self) -> None:
+        advisor = LayaAdvisor()
+        agent = MagicMock()
+        agent.predict.return_value = {"answers": {}}
+        advisor._agent = agent
+        advisory = advisor.get_advisory("ls -la", [])
+        assert advisory is not None
+        assert advisory.is_destructive == 0.0

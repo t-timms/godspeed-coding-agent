@@ -14,6 +14,24 @@ convention (see its body). Laya failing, timing out, or being uninstalled
 always degrades to "no annotation" — it must never fail closed, since an
 outage here must not affect the actual permission decision.
 
+Only the ``is_destructive`` question is used, not a multi-way risk category.
+A hand-labeled accuracy check against this checkpoint (24 shell commands,
+covering read_only/low/moderate/destructive) found the base checkpoint's
+4-way categorical classification scores ~37.5% — barely above the 25% random
+baseline for four classes, and not usable. ``is_destructive`` (a
+boolean/probability question) scored 87.5% on the same set and carries real
+signal. This matches an independent finding (eesel.ai's review of Laya) that
+its headline accuracy figures belong to a checkpoint fine-tuned on that
+specific benchmark, not the zero-shot base checkpoint used here.
+
+The same validation run found confidence never approached 0.7 across 40 test
+cases (permission + router questions combined) — the highest observed was
+0.64. There is no reliable calibration yet for what a "trustworthy"
+confidence value looks like for this question, so this module does not
+hard-gate on one: it always attaches the annotation when Laya succeeds and
+shows the raw probability so a human can judge the signal's strength
+themselves, rather than hiding it behind an opaque, unvalidated threshold.
+
 Scope: interactive (TUI) only. Headless already hard-denies HIGH/DESTRUCTIVE
 risk with no ASK moment to annotate, so there is nothing for Laya to attach to
 there.
@@ -56,12 +74,21 @@ def _is_laya_available() -> bool:
     return _laya_available
 
 
+_PERMISSION_QUESTIONS: dict[str, dict[str, Any]] = {
+    "is_destructive": {
+        "type": "noul",
+        "instructions": (
+            "Would running `command` cause irreversible data loss, system "
+            "damage, or destructive side effects?"
+        ),
+    },
+}
+
+
 @dataclass
 class LayaAdvisory:
     """One Laya read on a shell command. Advisory only — see module docstring."""
 
-    risk_category: str  # "read_only" | "low" | "moderate" | "destructive"
-    risk_category_confidence: float | None
     is_destructive: float  # calibrated probability, 0.0-1.0
     raw: dict[str, Any] = field(repr=False)
 
@@ -113,82 +140,53 @@ class LayaAdvisor:
                     return None
             return self._agent
 
-    def get_advisory(
-        self, command: str, dangers: list[str], *, timeout_ms: int = 200
-    ) -> LayaAdvisory | None:
-        """Score *command*. Returns ``None`` on any failure — never raises.
+    def ask(
+        self, state: Any, questions: dict[str, dict[str, Any]], *, timeout_ms: int = 200
+    ) -> dict[str, Any] | None:
+        """Ask Laya *questions* about *state*. Returns the raw ``predict()``
+        result, or ``None`` on any failure — never raises.
 
         ``predict()`` is synchronous with no native timeout, so it runs on a
-        dedicated single worker thread and is bounded with ``.result(timeout=...)``;
-        a hung call just leaks that one thread rather than blocking the caller.
+        dedicated single worker thread and is bounded with
+        ``.result(timeout=...)``; a hung call just leaks that one thread
+        rather than blocking the caller. Shared by every Laya-backed feature
+        (permission advisory, task-type routing, ...) so the checkpoint is
+        loaded once regardless of how many question sets get asked of it.
         """
         agent = self._agent_or_none()
         if agent is None:
             return None
         try:
-            future = self._executor.submit(self._predict, agent, command, dangers)
-            result = future.result(timeout=max(timeout_ms, 1) / 1000)
+            future = self._executor.submit(self._call_predict, agent, state, questions)
+            return future.result(timeout=max(timeout_ms, 1) / 1000)
         except FutureTimeoutError:
-            logger.warning("Laya advisory timed out after %dms — continuing without it", timeout_ms)
+            logger.warning("Laya ask() timed out after %dms — continuing without it", timeout_ms)
             return None
         except Exception:
-            logger.warning("Laya advisory failed — continuing without it", exc_info=True)
+            logger.warning("Laya ask() failed — continuing without it", exc_info=True)
             return None
-        return result
 
     @staticmethod
-    def _predict(agent: Any, command: str, dangers: list[str]) -> LayaAdvisory:
-        state = {"command": command, "regex_flags": dangers}
-        questions = {
-            "risk_category": {
-                "type": "choice",
-                "instructions": (
-                    "Classify the actual risk of running `command` in a coding agent's shell tool."
-                ),
-                "criteria": {
-                    "read_only": "no side effects: listing, viewing, searching, status checks",
-                    "low": "reversible local changes: editing a tracked file, installing a package",
-                    "moderate": (
-                        "harder-to-reverse changes scoped to this repo/session: "
-                        "force-push, deleting untracked files"
-                    ),
-                    "destructive": (
-                        "irreversible data loss or damage beyond this repo/session: "
-                        "recursive deletes of system paths, disk operations, "
-                        "credential exfiltration"
-                    ),
-                },
-            },
-            "is_destructive": {
-                "type": "noul",
-                "instructions": (
-                    "Would running `command` cause irreversible data loss, system "
-                    "damage, or destructive side effects?"
-                ),
-            },
-        }
+    def _call_predict(
+        agent: Any, state: Any, questions: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
         result = agent.predict(state, questions)
+        return result if isinstance(result, dict) else {}
+
+    def get_advisory(
+        self, command: str, dangers: list[str], *, timeout_ms: int = 200
+    ) -> LayaAdvisory | None:
+        """Score *command* for destructiveness. Returns ``None`` on any failure."""
+        state = {"command": command, "regex_flags": dangers}
+        result = self.ask(state, _PERMISSION_QUESTIONS, timeout_ms=timeout_ms)
+        if result is None:
+            return None
         answers = result.get("answers", {}) if isinstance(result, dict) else {}
-
-        category_answer = answers.get("risk_category", {})
-        category = category_answer.get("choice", "") if isinstance(category_answer, dict) else ""
-        category_confidence = (
-            category_answer.get("confidence") if isinstance(category_answer, dict) else None
-        )
-
         destructive_answer = answers.get("is_destructive", {})
         destructive_prob = (
             destructive_answer.get("noul", 0.0) if isinstance(destructive_answer, dict) else 0.0
         )
-
-        return LayaAdvisory(
-            risk_category=str(category),
-            risk_category_confidence=(
-                float(category_confidence) if category_confidence is not None else None
-            ),
-            is_destructive=float(destructive_prob),
-            raw=result if isinstance(result, dict) else {},
-        )
+        return LayaAdvisory(is_destructive=float(destructive_prob), raw=result)
 
 
 def annotate_ask_decision(
@@ -225,15 +223,9 @@ def annotate_ask_decision(
     advisory = LayaAdvisor.get().get_advisory(command, dangers, timeout_ms=laya_settings.timeout_ms)
     if advisory is None:
         return decision
-    if (
-        advisory.risk_category_confidence is not None
-        and advisory.risk_category_confidence < laya_settings.confidence_threshold
-    ):
-        return decision
 
     return PermissionDecision(
         decision.action,
-        f"{decision.reason} [laya: {advisory.risk_category}, "
-        f"destructive={advisory.is_destructive:.0%}]",
+        f"{decision.reason} [laya: destructive={advisory.is_destructive:.0%}]",
         metadata={**decision.metadata, "laya": advisory.raw},
     )

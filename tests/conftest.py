@@ -14,11 +14,23 @@ from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
 @pytest.fixture(autouse=True)
 def _ensure_logging_enabled() -> None:
-    """Re-enable logging in case a prior test disabled it."""
+    """Re-enable logging in case a prior test disabled it.
+
+    Also resets the "godspeed" logger's own level: tests that exercise
+    ``cli._setup_logging()`` (e.g. ``test_cli_more.py::TestSetupLogging``)
+    set ``logging.getLogger("godspeed").level`` as a side effect and never
+    reset it, since Python loggers are global singletons that persist for
+    the whole test session. Left alone, that leaks into every other test
+    under the ``godspeed.*`` namespace that runs afterward — any assertion
+    on INFO/DEBUG log output (e.g. via ``caplog``) would silently see
+    nothing, not because logging failed, but because an unrelated earlier
+    test raised the effective level to WARNING.
+    """
     logging.disable(logging.NOTSET)
     if not logging.root.handlers:
         logging.root.addHandler(logging.StreamHandler())
     logging.root.setLevel(logging.NOTSET)
+    logging.getLogger("godspeed").setLevel(logging.NOTSET)
 
 
 class MockTool(Tool):

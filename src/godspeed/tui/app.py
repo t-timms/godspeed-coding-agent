@@ -23,7 +23,7 @@ from godspeed.agent.conversation import (
 from godspeed.agent.loop import agent_loop
 from godspeed.agent.result import AgentCancelledError
 from godspeed.audit.trail import AuditTrail
-from godspeed.config import GodspeedSettings
+from godspeed.config import GodspeedSettings, load_settings
 from godspeed.llm.client import LLMClient
 from godspeed.security.permissions import ALLOW, ASK, PermissionDecision, PermissionEngine
 from godspeed.tools.base import RiskLevel, ToolContext
@@ -678,6 +678,7 @@ class TUIApp:
                 on_thinking=_on_thinking,
                 session_id=self._session_id,
                 durability=True,
+                laya_settings=load_settings().laya,
             )
             _output.console.print()  # End streaming output with newline
         except AgentCancelledError:
