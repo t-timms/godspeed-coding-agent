@@ -680,8 +680,15 @@ class GodspeedSettings(BaseModel):
         # Warn on unknown top-level keys (typos / newer configs)
         _warn_unknown_keys(merged)
 
-        # Env vars / constructor args take final precedence
-        merged.update({k: v for k, v in data.items() if v is not None})
+        # Env vars / constructor args take final precedence, but must not
+        # silently drop sibling YAML keys in the same nested block — e.g. a
+        # GODSPEED_PERMISSIONS__ASK override should not wipe out a
+        # YAML-defined permissions.deny. A plain dict.update() here would
+        # replace the whole "permissions" sub-dict with whatever partial one
+        # `data` carries. Reuse the same nested-merge semantics already used
+        # for project-over-global YAML above (and its deny-is-additive
+        # invariant) instead of a shallow update.
+        _merge_configs(merged, {k: v for k, v in data.items() if v is not None})
         return merged
 
 
@@ -1062,18 +1069,35 @@ def _warn_unknown_keys(data: dict[str, Any]) -> None:
 
 
 def _merge_configs(base: dict[str, Any], override: dict[str, Any]) -> None:
-    """Merge override into base. Deny rules are additive (project can't weaken global denies)."""
+    """Merge override into base. Deny rules are additive (project can't weaken global denies).
+
+    ``override`` values are usually plain dicts (from YAML or env-var
+    parsing), but a nested settings field's declared type is the actual
+    BaseModel subclass (e.g. ``permissions: PermissionSettings``), so an
+    explicit constructor kwarg like ``permissions=PermissionSettings(...)``
+    is just as valid as ``permissions={...}``. Normalize any such instance
+    to a dict of only its explicitly-set fields first, so it merges the
+    same way a dict would instead of silently replacing the whole block —
+    ``exclude_unset`` matters here: a full dump would include the model's
+    own field defaults (e.g. the built-in deny list) as if the caller had
+    asked for them.
+    """
     for key, value in override.items():
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(exclude_unset=True)
         if key == "permissions" and isinstance(value, dict):
             base_perms = base.setdefault("permissions", {})
-            # Deny rules are additive — project can only add more denies
-            if "deny" in value:
+            # Deny rules are additive — project can only add more denies.
+            # An explicit `deny: None` is treated as "not specified" (same
+            # convention load_yaml_configs already uses at the top level)
+            # rather than crashing on `existing + None`.
+            if value.get("deny") is not None:
                 existing = base_perms.get("deny", [])
                 base_perms["deny"] = list(dict.fromkeys(existing + value["deny"]))
             # Allow and ask rules: project overrides global
-            if "allow" in value:
+            if value.get("allow") is not None:
                 base_perms["allow"] = value["allow"]
-            if "ask" in value:
+            if value.get("ask") is not None:
                 base_perms["ask"] = value["ask"]
         elif isinstance(value, dict) and isinstance(base.get(key), dict):
             _merge_configs(base[key], value)
