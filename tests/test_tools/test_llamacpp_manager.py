@@ -10,6 +10,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from godspeed.tools.llamacpp_manager import (
+    DEFAULT_CONTEXT,
+    DRAFT_MODE_MAX_CONTEXT,
     LlamaCppTool,
     configure_litellm_env,
     get_server_status,
@@ -17,6 +19,14 @@ from godspeed.tools.llamacpp_manager import (
     start_server,
     stop_server,
 )
+
+
+def _all_flag_values(cmd: list[str], flag: str) -> list[str]:
+    """Every value passed for *flag* in *cmd*, in order — lets a test
+    assert a flag appears exactly once (regression guard for the bug where
+    a second -c 24576 silently overrode whatever the first -c decided,
+    since llama-server takes the last occurrence of a repeated flag)."""
+    return [cmd[i + 1] for i, arg in enumerate(cmd) if arg == flag and i + 1 < len(cmd)]
 
 
 class TestFindServerBinary:
@@ -558,6 +568,74 @@ class TestStartServerExtended:
                     with patch("subprocess.Popen", return_value=mock_proc):
                         result = start_server(timeout=1)
         assert result is None
+
+
+class TestDraftModeContextCapping:
+    """Regression coverage for the double -c flag bug: a second, hardcoded
+    -c 24576 used to be appended whenever a draft model was active, always
+    silently overriding whatever the caller actually requested — raising a
+    smaller request, lowering a larger one, always landing on exactly
+    24576 regardless of intent. Fixed to cap (never raise) via
+    effective_context, with only one -c flag ever emitted."""
+
+    def _start_and_capture_cmd(
+        self, *, context: int, draft_model_path: Path | None | bool
+    ) -> list[str]:
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        with patch("godspeed.tools.llamacpp_manager.is_server_running", side_effect=[False, True]):
+            with patch(
+                "godspeed.tools.llamacpp_manager._find_server_binary",
+                return_value=Path("/fake/llama-server"),
+            ):
+                with patch(
+                    "godspeed.tools.llamacpp_manager._find_model",
+                    return_value=Path("/fake/model.gguf"),
+                ):
+                    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+                        result = start_server(
+                            context=context,
+                            draft_model_path=draft_model_path,
+                            timeout=1,
+                        )
+        assert result is mock_proc
+        cmd: list[str] = mock_popen.call_args[0][0]
+        return cmd
+
+    def test_no_draft_model_context_passed_through_unchanged(self) -> None:
+        cmd = self._start_and_capture_cmd(context=65536, draft_model_path=False)
+        assert _all_flag_values(cmd, "-c") == ["65536"]
+
+    def test_draft_model_default_context_gets_capped(self) -> None:
+        cmd = self._start_and_capture_cmd(
+            context=DEFAULT_CONTEXT, draft_model_path=Path("/fake/draft.gguf")
+        )
+        assert DEFAULT_CONTEXT > DRAFT_MODE_MAX_CONTEXT
+        assert _all_flag_values(cmd, "-c") == [str(DRAFT_MODE_MAX_CONTEXT)]
+
+    def test_draft_model_small_explicit_context_not_raised(self) -> None:
+        # The exact inverse of the old bug: a request smaller than the cap
+        # used to get silently bumped UP to 24576. Must stay as requested.
+        cmd = self._start_and_capture_cmd(context=8192, draft_model_path=Path("/fake/draft.gguf"))
+        assert _all_flag_values(cmd, "-c") == ["8192"]
+
+    def test_draft_model_context_at_cap_boundary_unchanged(self) -> None:
+        cmd = self._start_and_capture_cmd(
+            context=DRAFT_MODE_MAX_CONTEXT, draft_model_path=Path("/fake/draft.gguf")
+        )
+        assert _all_flag_values(cmd, "-c") == [str(DRAFT_MODE_MAX_CONTEXT)]
+
+    def test_draft_model_large_explicit_context_capped(self) -> None:
+        cmd = self._start_and_capture_cmd(context=131072, draft_model_path=Path("/fake/draft.gguf"))
+        assert _all_flag_values(cmd, "-c") == [str(DRAFT_MODE_MAX_CONTEXT)]
+
+    def test_c_flag_never_appears_more_than_once(self) -> None:
+        # Direct regression guard for the actual bug shape, independent of
+        # which value wins.
+        cmd = self._start_and_capture_cmd(
+            context=DEFAULT_CONTEXT, draft_model_path=Path("/fake/draft.gguf")
+        )
+        assert cmd.count("-c") == 1
 
 
 class TestGetServerStatusExtended:

@@ -51,6 +51,23 @@ DEFAULT_MODEL_FILE = "qwen2.5-coder-14b-q4_K_M.gguf"
 DEFAULT_CONTEXT = 32768
 DEFAULT_GPU_LAYERS = 999
 
+# VRAM-validated ceiling for context when speculative decoding is active,
+# specific to the current default model pairing (14B Q4_K main + a 0.5B/1.5B
+# draft): 14B Q4_K (~8.1 GiB) + 1.5B Q5_K (~1.2 GiB) + KV cache at 24576
+# context (~4.5 GiB) = ~13.8 GiB, fits a 16 GB card with margin. Only a
+# *ceiling*, not the value to always use — see start_server's context
+# handling below. Re-validate this number if the default model pairing ever
+# changes (e.g. Workstream 2's Devstral Small 2 24B + MiniCPM5-2B).
+#
+# Open question, not resolved here: this math counts KV cache against VRAM,
+# but start_server's own no_kv_offload default is True — meaning KV cache
+# is placed in system RAM by default, which the original math didn't
+# account for. Whether that makes this ceiling overly conservative can only
+# be settled by a real run against the actual GPU (no ~/.llamacpp/ build or
+# model was available in-session to verify), so the validated 24576 value
+# is kept as-is here rather than guessed at.
+DRAFT_MODE_MAX_CONTEXT = 24576
+
 
 def _find_server_binary() -> Path | None:
     """Locate llama-server binary in common paths."""
@@ -159,7 +176,11 @@ def start_server(
             None = auto-detect draft model file and use (default),
             False = disable,
             Path = explicitly use this GGUF as draft.
-        context: Context window size in tokens (reduced to 24576 with draft).
+        context: Context window size in tokens. Capped at
+            DRAFT_MODE_MAX_CONTEXT when a draft model is active (VRAM must
+            fit both models plus KV cache) — never raised above what was
+            requested, only lowered when it would exceed the validated
+            ceiling.
         gpu_layers: Number of layers to offload to GPU (999 = all).
         flash_attn: Enable Flash Attention for faster prompt processing.
         greedy: Use greedy sampling (temp=0, top_k=1) for spec decoding.
@@ -200,12 +221,26 @@ def start_server(
     if draft_model_path is None:
         draft_model_path = _find_draft_model()
 
+    # Cap (never raise) context when a draft model is active — see
+    # DRAFT_MODE_MAX_CONTEXT's comment for the VRAM math. A single -c flag
+    # is emitted below with this value; llama-server takes the *last*
+    # occurrence of a repeated flag, so appending a second one later would
+    # silently override whatever was decided here regardless of intent.
+    effective_context = context
+    if draft_model_path and context > DRAFT_MODE_MAX_CONTEXT:
+        logger.info(
+            "Capping context %d -> %d for speculative decoding (VRAM budget)",
+            context,
+            DRAFT_MODE_MAX_CONTEXT,
+        )
+        effective_context = DRAFT_MODE_MAX_CONTEXT
+
     cmd = [
         str(server_bin),
         "-m",
         str(model_path),
         "-c",
-        str(context),
+        str(effective_context),
         "--n-gpu-layers",
         str(gpu_layers),
         "--host",
@@ -242,11 +277,13 @@ def start_server(
         cmd.append("0")
         cmd.append("--draft-p-min")
         cmd.append("0.75")
-        # Reduce context to fit both models in 16 GB VRAM.
-        # 14B Q4_K (~8.1 GiB) + 1.5B Q5_K (~1.2 GiB) + KV cache
-        # at 24576 context (~4.5 GiB) = ~13.8 GiB, fits with margin.
-        cmd.append("-c")
-        cmd.append("24576")
+        # Context is already capped above (effective_context) — do not
+        # append a second -c flag here. llama-server takes the *last*
+        # occurrence of a repeated flag, so a second -c here would silently
+        # override the cap/request decision made above regardless of what
+        # it computed. This is exactly the bug that used to force every
+        # request down to a hardcoded 24576 even when the caller's context
+        # already fit comfortably below it, or explicitly asked for less.
 
     # Disable auto-fit: user has validated context sizes on this card.
     cmd.append("--fit")
