@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -25,8 +26,26 @@ def _all_flag_values(cmd: list[str], flag: str) -> list[str]:
     """Every value passed for *flag* in *cmd*, in order — lets a test
     assert a flag appears exactly once (regression guard for the bug where
     a second -c 24576 silently overrode whatever the first -c decided,
-    since llama-server takes the last occurrence of a repeated flag)."""
+    since llama-server takes the last occurrence of a repeated flag).
+
+    Only meaningful for flags that take a value: a bare/valueless flag
+    (e.g. --no-kv-offload) has no value slot, so callers must not pass one
+    here — the next token in ``cmd`` would just be the *next* flag's name,
+    not a real value for this one.
+    """
     return [cmd[i + 1] for i, arg in enumerate(cmd) if arg == flag and i + 1 < len(cmd)]
+
+
+def _flag_counts(cmd: list[str]) -> dict[str, int]:
+    """How many times each dash-prefixed flag appears in *cmd*. General
+    version of the -c-specific duplicate check: no flag should ever appear
+    more than once, since llama-server silently takes the last occurrence
+    of a repeated flag regardless of which one that is."""
+    counts: dict[str, int] = {}
+    for arg in cmd:
+        if arg.startswith("-"):
+            counts[arg] = counts.get(arg, 0) + 1
+    return counts
 
 
 class TestFindServerBinary:
@@ -579,7 +598,10 @@ class TestDraftModeContextCapping:
     effective_context, with only one -c flag ever emitted."""
 
     def _start_and_capture_cmd(
-        self, *, context: int, draft_model_path: Path | None | bool
+        self,
+        *,
+        context: int,
+        draft_model_path: Path | Literal[False] | None,
     ) -> list[str]:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
@@ -593,11 +615,15 @@ class TestDraftModeContextCapping:
                     return_value=Path("/fake/model.gguf"),
                 ):
                     with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
-                        result = start_server(
-                            context=context,
-                            draft_model_path=draft_model_path,
-                            timeout=1,
-                        )
+                        # Avoid a real 0.5s sleep in the ready-poll loop —
+                        # is_server_running's second call already reports
+                        # ready, so the loop body never needs to run for real.
+                        with patch("godspeed.tools.llamacpp_manager.time.sleep"):
+                            result = start_server(
+                                context=context,
+                                draft_model_path=draft_model_path,
+                                timeout=1,
+                            )
         assert result is mock_proc
         cmd: list[str] = mock_popen.call_args[0][0]
         return cmd
@@ -636,6 +662,58 @@ class TestDraftModeContextCapping:
             context=DEFAULT_CONTEXT, draft_model_path=Path("/fake/draft.gguf")
         )
         assert cmd.count("-c") == 1
+
+    def test_no_flag_ever_appears_more_than_once(self) -> None:
+        # General form of the above: the bug class (a repeated flag
+        # silently losing to whichever occurrence comes last) could recur
+        # for any flag, not just -c. Every flag built by start_server must
+        # appear at most once regardless of which options are active.
+        cmd = self._start_and_capture_cmd(
+            context=DEFAULT_CONTEXT, draft_model_path=Path("/fake/draft.gguf")
+        )
+        dupes = {flag: count for flag, count in _flag_counts(cmd).items() if count > 1}
+        assert dupes == {}
+
+    def test_auto_detected_draft_model_also_capped(self) -> None:
+        # draft_model_path=None (the actual default) resolves via
+        # _find_draft_model() before the capping decision runs — confirm
+        # the interaction works through that path too, not just when a
+        # Path is passed explicitly.
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        with (
+            patch("godspeed.tools.llamacpp_manager.is_server_running", side_effect=[False, True]),
+            patch(
+                "godspeed.tools.llamacpp_manager._find_server_binary",
+                return_value=Path("/fake/llama-server"),
+            ),
+            patch(
+                "godspeed.tools.llamacpp_manager._find_model",
+                return_value=Path("/fake/model.gguf"),
+            ),
+            patch(
+                "godspeed.tools.llamacpp_manager._find_draft_model",
+                return_value=Path("/fake/auto-draft.gguf"),
+            ),
+            patch("subprocess.Popen", return_value=mock_proc) as mock_popen,
+            patch("godspeed.tools.llamacpp_manager.time.sleep"),
+        ):
+            result = start_server(context=DEFAULT_CONTEXT, timeout=1)
+        assert result is mock_proc
+        cmd: list[str] = mock_popen.call_args[0][0]
+        assert _all_flag_values(cmd, "-c") == [str(DRAFT_MODE_MAX_CONTEXT)]
+
+    def test_capping_log_message(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO):
+            self._start_and_capture_cmd(
+                context=DEFAULT_CONTEXT, draft_model_path=Path("/fake/draft.gguf")
+            )
+        assert f"Capping context {DEFAULT_CONTEXT} -> {DRAFT_MODE_MAX_CONTEXT}" in caplog.text
+
+    def test_no_log_message_when_not_capped(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.INFO):
+            self._start_and_capture_cmd(context=8192, draft_model_path=Path("/fake/draft.gguf"))
+        assert "Capping context" not in caplog.text
 
 
 class TestGetServerStatusExtended:

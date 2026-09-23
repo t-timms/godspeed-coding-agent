@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
@@ -59,13 +59,18 @@ DEFAULT_GPU_LAYERS = 999
 # handling below. Re-validate this number if the default model pairing ever
 # changes (e.g. Workstream 2's Devstral Small 2 24B + MiniCPM5-2B).
 #
-# Open question, not resolved here: this math counts KV cache against VRAM,
-# but start_server's own no_kv_offload default is True — meaning KV cache
-# is placed in system RAM by default, which the original math didn't
-# account for. Whether that makes this ceiling overly conservative can only
-# be settled by a real run against the actual GPU (no ~/.llamacpp/ build or
-# model was available in-session to verify), so the validated 24576 value
-# is kept as-is here rather than guessed at.
+# This math counts KV cache against VRAM, while start_server's own
+# no_kv_offload default is True (KV cache placed in system RAM) — so it's
+# tempting to conclude the real ceiling could be raised. It can't be
+# concluded from arithmetic alone: per llama.cpp's own maintainers
+# (github.com/ggml-org/llama.cpp/discussions/26736), the attention/compute
+# scratch buffer still scales with context and still consumes VRAM even
+# under --no-kv-offload — moving the *persistent* KV cache to system RAM
+# doesn't make context free of VRAM cost. What the real ceiling should be
+# under no_kv_offload=True requires measuring actual allocation against the
+# real GPU (no ~/.llamacpp/ build or model was available in-session to do
+# that), not more arithmetic, so 24576 is kept as the validated value
+# rather than raised on a guess.
 DRAFT_MODE_MAX_CONTEXT = 24576
 
 
@@ -157,7 +162,7 @@ def is_server_running(url: str = DEFAULT_URL) -> bool:
 def start_server(
     *,
     model_path: Path | None = None,
-    draft_model_path: Path | None = None,
+    draft_model_path: Path | Literal[False] | None = None,
     context: int = DEFAULT_CONTEXT,
     gpu_layers: int = DEFAULT_GPU_LAYERS,
     flash_attn: bool = True,
@@ -176,11 +181,9 @@ def start_server(
             None = auto-detect draft model file and use (default),
             False = disable,
             Path = explicitly use this GGUF as draft.
-        context: Context window size in tokens. Capped at
-            DRAFT_MODE_MAX_CONTEXT when a draft model is active (VRAM must
-            fit both models plus KV cache) — never raised above what was
-            requested, only lowered when it would exceed the validated
-            ceiling.
+        context: Context window size in tokens. See DRAFT_MODE_MAX_CONTEXT
+            for how this is capped (never raised) when a draft model is
+            active.
         gpu_layers: Number of layers to offload to GPU (999 = all).
         flash_attn: Enable Flash Attention for faster prompt processing.
         greedy: Use greedy sampling (temp=0, top_k=1) for spec decoding.
@@ -222,18 +225,17 @@ def start_server(
         draft_model_path = _find_draft_model()
 
     # Cap (never raise) context when a draft model is active — see
-    # DRAFT_MODE_MAX_CONTEXT's comment for the VRAM math. A single -c flag
-    # is emitted below with this value; llama-server takes the *last*
+    # DRAFT_MODE_MAX_CONTEXT for the VRAM rationale. A single -c flag is
+    # emitted below with this value; llama-server takes the *last*
     # occurrence of a repeated flag, so appending a second one later would
     # silently override whatever was decided here regardless of intent.
-    effective_context = context
-    if draft_model_path and context > DRAFT_MODE_MAX_CONTEXT:
+    effective_context = min(context, DRAFT_MODE_MAX_CONTEXT) if draft_model_path else context
+    if effective_context != context:
         logger.info(
             "Capping context %d -> %d for speculative decoding (VRAM budget)",
             context,
-            DRAFT_MODE_MAX_CONTEXT,
+            effective_context,
         )
-        effective_context = DRAFT_MODE_MAX_CONTEXT
 
     cmd = [
         str(server_bin),
@@ -277,13 +279,8 @@ def start_server(
         cmd.append("0")
         cmd.append("--draft-p-min")
         cmd.append("0.75")
-        # Context is already capped above (effective_context) — do not
-        # append a second -c flag here. llama-server takes the *last*
-        # occurrence of a repeated flag, so a second -c here would silently
-        # override the cap/request decision made above regardless of what
-        # it computed. This is exactly the bug that used to force every
-        # request down to a hardcoded 24576 even when the caller's context
-        # already fit comfortably below it, or explicitly asked for less.
+        # Do not append another -c here — see the effective_context
+        # computation above, which already accounts for draft mode.
 
     # Disable auto-fit: user has validated context sizes on this card.
     cmd.append("--fit")
