@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from godspeed.agent.conversation import Conversation
 from godspeed.agent.loop import _parse_tool_call, agent_loop
+from godspeed.config import LayaSettings
 from godspeed.llm.client import ChatResponse, LLMClient
+from godspeed.security.laya_advisor import LayaAdvisor
 from godspeed.tools.base import ToolResult
 from godspeed.tools.registry import ToolRegistry
 from tests.conftest import MockTool
@@ -189,6 +192,108 @@ class TestAgentLoop:
 
         result = await agent_loop("Do something", conversation, client, registry, tool_context)
         assert "Recovered" in result
+
+
+def _fake_laya_module() -> MagicMock:
+    fake = MagicMock()
+    fake.router_questions.return_value = {"difficulty": {"type": "score"}}
+    return fake
+
+
+class TestAgentLoopLayaRouting:
+    """Real end-to-end coverage (not just llm/router.py's own unit tests)
+    that laya_settings wiring at the agent_loop choke point behaves as
+    designed: Laya is asked about the turn once, from the real user_input,
+    and the escalation applies across every iteration of that turn — even
+    once a synthetic continuation-nudge role="user" message (see
+    agent/tools/tasks.py's build_continuation_nudge) becomes the latest
+    "user" entry in conversation.messages. This is the exact scenario code
+    review found broken when task_type escalation used to be derived by
+    re-scanning conversation.messages every iteration instead of scoring
+    the turn's real request text once."""
+
+    @pytest.mark.asyncio
+    async def test_escalates_across_iterations_scored_from_real_request(
+        self, tool_context
+    ) -> None:
+        conversation = Conversation("You are a coding agent.", max_tokens=100_000)
+        registry = ToolRegistry()
+        registry.register(MockTool(name="file_edit"))
+
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_response("file_edit", {"file_path": "auth.py"}),
+                _make_tool_response("file_edit", {"file_path": "auth.py"}),
+                _make_text_response("Done"),
+            ]
+        )
+
+        real_request = "refactor the entire auth system across every service"
+        laya_settings = LayaSettings(enabled=True, difficulty_escalate_threshold=1.5)
+
+        with (
+            patch("godspeed.security.laya_advisor._is_laya_available", return_value=True),
+            patch.dict(sys.modules, {"laya": _fake_laya_module()}),
+            patch.object(LayaAdvisor, "get") as mock_get,
+        ):
+            mock_get.return_value.ask.return_value = {
+                "answers": {"difficulty": {"type": "score", "score": 2.9, "confidence": 0.9}}
+            }
+            result = await agent_loop(
+                real_request,
+                conversation,
+                client,
+                registry,
+                tool_context,
+                laya_settings=laya_settings,
+            )
+
+        assert "Done" in result
+        # Laya asked exactly once for the whole turn, not once per iteration
+        # (3 iterations happened above).
+        mock_get.return_value.ask.assert_called_once()
+        assert mock_get.return_value.ask.call_args[0][0] == {"request": real_request}
+
+        # classify_task_type would call iteration 2/3 "edit" (last assistant
+        # turn called file_edit) -- confirm escalation to "plan" actually
+        # reached client.chat's task_type kwarg on those later iterations,
+        # not just iteration 1 (which starts as "plan" anyway with no prior
+        # assistant turn, so wouldn't distinguish a working fix from a
+        # no-op).
+        task_types = [call.kwargs.get("task_type") for call in client.chat.call_args_list]
+        assert task_types == ["plan", "plan", "plan"]
+
+    @pytest.mark.asyncio
+    async def test_disabled_laya_settings_task_type_unaffected(self, tool_context) -> None:
+        conversation = Conversation("You are a coding agent.", max_tokens=100_000)
+        registry = ToolRegistry()
+        registry.register(MockTool(name="file_edit"))
+
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_response("file_edit", {"file_path": "auth.py"}),
+                _make_text_response("Done"),
+            ]
+        )
+
+        with patch.object(LayaAdvisor, "get") as mock_get:
+            result = await agent_loop(
+                "trivial request",
+                conversation,
+                client,
+                registry,
+                tool_context,
+                laya_settings=None,
+            )
+
+        assert "Done" in result
+        mock_get.assert_not_called()
+        task_types = [call.kwargs.get("task_type") for call in client.chat.call_args_list]
+        # Iteration 1: no prior assistant turn -> plan. Iteration 2: last
+        # assistant turn called file_edit -> edit. Neither escalated.
+        assert task_types == ["plan", "edit"]
 
 
 class TestStuckLoopDetection:

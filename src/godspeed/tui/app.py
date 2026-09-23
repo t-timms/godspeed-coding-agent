@@ -657,6 +657,10 @@ class TUIApp:
 
         try:
             spinner.start()
+            # Off the event loop — see the identical hazard documented at
+            # _InteractivePermissionProxy.evaluate()'s load_settings() call
+            # in this same file.
+            laya_settings = (await asyncio.to_thread(load_settings)).laya
             await agent_loop(
                 user_input=effective_input if effective_input else user_input,
                 conversation=self._conversation,
@@ -678,7 +682,7 @@ class TUIApp:
                 on_thinking=_on_thinking,
                 session_id=self._session_id,
                 durability=True,
-                laya_settings=load_settings().laya,
+                laya_settings=laya_settings,
             )
             _output.console.print()  # End streaming output with newline
         except AgentCancelledError:
@@ -1055,7 +1059,6 @@ class _InteractivePermissionProxy:
             return decision
 
         try:
-            from godspeed.config import load_settings
             from godspeed.security.laya_advisor import annotate_ask_decision
 
             decision = annotate_ask_decision(decision, tool_call, load_settings().laya)

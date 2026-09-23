@@ -290,6 +290,12 @@ class ChatScreen(Screen):
         try:
             from godspeed.agent.loop import agent_loop
 
+            # Off the event loop: load_settings() does env-var scanning
+            # plus YAML stat/read, and this call happens once per submitted
+            # message on the live chat screen — see the identical hazard
+            # documented at tui/textual_app.py's own load_settings() call.
+            laya_settings = (await asyncio.to_thread(load_settings)).laya
+
             self._tool_calls = 0
             self._tool_errors = 0
             self._tool_denied = 0
@@ -344,7 +350,7 @@ class ChatScreen(Screen):
                 task_store=getattr(self._commands, "_task_store", None),
                 session_id=self._session_id,
                 durability=True,
-                laya_settings=load_settings().laya,
+                laya_settings=laya_settings,
             )
             chat_log.end_turn()
             chat_log.write()

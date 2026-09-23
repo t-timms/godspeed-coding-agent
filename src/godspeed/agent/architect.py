@@ -76,6 +76,7 @@ async def architect_loop(
                 "on_assistant_chunk",
                 "on_thinking",
                 "max_iterations",
+                "laya_settings",
             }
         },
     )
@@ -121,6 +122,7 @@ async def architect_loop(
                 "auto_commit_threshold",
                 "on_parallel_start",
                 "on_parallel_complete",
+                "laya_settings",
             }
         },
     )

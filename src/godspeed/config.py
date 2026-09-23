@@ -326,9 +326,15 @@ class LayaSettings(BaseModel):
     # same validation run found real difficulty scores compress toward the
     # middle of the scale (moderate/hard requests scored 1.28-2.26; the
     # highest trivial/easy score observed was 1.48). 1.5 catches more real
-    # escalations than 2.0 would while still producing zero false escalations
+    # escalations than 2.0 would while producing zero false escalations
     # against that sample. Don't "fix" this back to 2.0 assuming that's more
     # principled — it measurably isn't, on the data available.
+    #
+    # Not a settled calibration, though: those two ranges overlap in
+    # [1.28, 1.48], so a genuinely hard request scoring in that band (e.g.
+    # 1.35) still silently stays unescalated at 1.5 — the same failure mode
+    # this feature exists to prevent, just less often than at 2.0. Only a
+    # larger validation set narrows that band further.
     difficulty_escalate_threshold: float = 1.5
 
     model_config = ConfigDict(extra="ignore")

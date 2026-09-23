@@ -35,10 +35,21 @@ themselves, rather than hiding it behind an opaque, unvalidated threshold.
 Scope: interactive (TUI) only. Headless already hard-denies HIGH/DESTRUCTIVE
 risk with no ASK moment to annotate, so there is nothing for Laya to attach to
 there.
+
+The validation run's script/dataset isn't checked into this repo (manual,
+one-off — see ``scripts/validate_laya_accuracy.py`` for a reproducible
+version). ``laya.load("convaiinnovations/laya")`` below has no way to pin a
+specific Hub revision — checked against the installed package's actual
+``load()`` signature (``model_id_or_path``, ``device``, ``token``,
+``subfolder``; no ``revision``), not assumed — so if the upstream checkpoint
+is ever updated in place, the numbers above would silently stop describing
+the model actually being loaded. Re-running the validation script
+periodically is the only mitigation available today.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -93,6 +104,24 @@ class LayaAdvisory:
     raw: dict[str, Any] = field(repr=False)
 
 
+def extract_answer(result: dict[str, Any] | None, question: str) -> dict[str, Any] | None:
+    """Pull ``answers[question]`` out of a raw ``predict()`` result.
+
+    Shared by every Laya-backed feature's response parsing (permission
+    advisory, task-type routing in ``llm/router.py``, ...) so a fix to how a
+    malformed/missing answer is handled only needs to happen once. Returns
+    ``None`` for anything malformed — missing ``"answers"``, a non-dict
+    answer, or *result* itself not a dict — never raises.
+    """
+    if not isinstance(result, dict):
+        return None
+    answers = result.get("answers")
+    if not isinstance(answers, dict):
+        return None
+    answer = answers.get(question)
+    return answer if isinstance(answer, dict) else None
+
+
 class LayaAdvisor:
     """Lazily loads and caches a single Laya agent — pays model-load cost once."""
 
@@ -112,7 +141,13 @@ class LayaAdvisor:
         # future.result(timeout=...) clocks from submission, not from when
         # execution actually starts. Fails neutral either way (annotation is
         # just dropped), so this is a missed-advisory cost, not a
-        # correctness or security one.
+        # correctness or security one. Now shared by two call frequencies —
+        # this permission advisory (fires only on ASK-tier shell decisions)
+        # and llm/router.py's task-type routing (fires at most once per
+        # agent_loop turn) — so a single genuinely hung predict() call
+        # disables both features for the process's lifetime, not just one.
+        # Still an accepted trade-off: both degrade to "no annotation"/"no
+        # escalation", never to a wrong action.
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="laya-advisor")
 
     @classmethod
@@ -178,14 +213,18 @@ class LayaAdvisor:
     ) -> LayaAdvisory | None:
         """Score *command* for destructiveness. Returns ``None`` on any failure."""
         state = {"command": command, "regex_flags": dangers}
-        result = self.ask(state, _PERMISSION_QUESTIONS, timeout_ms=timeout_ms)
+        # Deep-copy: _PERMISSION_QUESTIONS is a shared module-level constant
+        # reused across every call. If predict() ever mutated its questions
+        # argument in place (not confirmed either way against the real
+        # package), that would otherwise leak into every future call for the
+        # process's lifetime instead of being discarded per-call.
+        result = self.ask(state, copy.deepcopy(_PERMISSION_QUESTIONS), timeout_ms=timeout_ms)
         if result is None:
             return None
-        answers = result.get("answers", {}) if isinstance(result, dict) else {}
-        destructive_answer = answers.get("is_destructive", {})
-        destructive_prob = (
-            destructive_answer.get("noul", 0.0) if isinstance(destructive_answer, dict) else 0.0
-        )
+        destructive_answer = extract_answer(result, "is_destructive")
+        destructive_prob = destructive_answer.get("noul") if destructive_answer else None
+        if not isinstance(destructive_prob, int | float):
+            destructive_prob = 0.0
         return LayaAdvisory(is_destructive=float(destructive_prob), raw=result)
 
 

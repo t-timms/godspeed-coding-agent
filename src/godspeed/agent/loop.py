@@ -30,7 +30,11 @@ from godspeed.agent.session_lease import SessionLease
 from godspeed.agent.turn_journal import TurnJournal, request_fingerprint
 from godspeed.hooks import HookEvent
 from godspeed.llm.client import ChatResponse, LLMClient
-from godspeed.llm.router import classify_task_type, maybe_escalate_task_type
+from godspeed.llm.router import (
+    classify_task_type,
+    get_laya_difficulty_score,
+    maybe_escalate_task_type,
+)
 from godspeed.observability.metrics import LoopMetrics, MetricsSink
 from godspeed.security.dangerous import detect_dangerous_command
 from godspeed.security.secrets import detect_secrets
@@ -244,7 +248,13 @@ async def agent_loop(
         laya_settings: Optional Laya settings enabling task-type routing
             escalation (see ``llm.router.maybe_escalate_task_type``). Unset
             or disabled means routing behaves exactly as before this option
-            existed — escalation is opt-in and fails neutral.
+            existed — escalation is opt-in and fails neutral. Forwarded to
+            ``agent.architect.architect_loop``'s nested ``agent_loop`` calls
+            (both planning and execution phases), but **not** to
+            ``agent.coordinator.Coordinator``-spawned sub-agents, which
+            already receive a deliberately narrower kwarg surface than the
+            top-level turn (no pause/cancel events, task_store, session_id,
+            etc. either) — out of scope for this pass.
 
     Returns:
         The final assistant text response.
@@ -255,6 +265,18 @@ async def agent_loop(
     if not skip_user_message and user_input:
         conversation.add_user_message(user_input)
     tool_schemas = tool_registry.get_schemas()
+
+    # Laya's difficulty read on the turn's actual request, computed once
+    # (not per iteration — the request's difficulty doesn't change as the
+    # agent works through it) and off the event loop, since ask() blocks
+    # for up to laya_settings.timeout_ms. Deliberately scored from
+    # user_input directly, not from scanning conversation.messages for the
+    # latest role="user" entry — see get_laya_difficulty_score's docstring
+    # for why that would silently score the wrong text from iteration 2
+    # onward (continuation nudges are injected as role="user" messages too).
+    laya_difficulty_score = await asyncio.to_thread(
+        get_laya_difficulty_score, user_input, laya_settings
+    )
 
     retries = 0
     final_text = ""
@@ -345,8 +367,10 @@ async def agent_loop(
         # state. Cheap heuristic (no extra LLM call); resolves to one of
         # plan/edit/read/shell. The router translates that to a model
         # via settings.routing (or the cheap_model/strong_model shortcuts).
+        # maybe_escalate_task_type is pure/cheap here too — it only combines
+        # task_type with laya_difficulty_score, computed once above.
         task_type = classify_task_type(conversation.messages)
-        task_type = maybe_escalate_task_type(task_type, conversation.messages, laya_settings)
+        task_type = maybe_escalate_task_type(task_type, laya_difficulty_score, laya_settings)
 
         # Continuation nudge: if the task store has open tasks, remind the
         # model to keep working through them before it decides to stop.
