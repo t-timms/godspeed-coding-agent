@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
@@ -50,6 +50,28 @@ DEFAULT_SERVER_BINS: list[Path] = [
 DEFAULT_MODEL_FILE = "qwen2.5-coder-14b-q4_K_M.gguf"
 DEFAULT_CONTEXT = 32768
 DEFAULT_GPU_LAYERS = 999
+
+# VRAM-validated ceiling for context when speculative decoding is active,
+# specific to the current default model pairing (14B Q4_K main + a 0.5B/1.5B
+# draft): 14B Q4_K (~8.1 GiB) + 1.5B Q5_K (~1.2 GiB) + KV cache at 24576
+# context (~4.5 GiB) = ~13.8 GiB, fits a 16 GB card with margin. Only a
+# *ceiling*, not the value to always use — see start_server's context
+# handling below. Re-validate this number if the default model pairing ever
+# changes (e.g. Workstream 2's Devstral Small 2 24B + MiniCPM5-2B).
+#
+# This math counts KV cache against VRAM, while start_server's own
+# no_kv_offload default is True (KV cache placed in system RAM) — so it's
+# tempting to conclude the real ceiling could be raised. It can't be
+# concluded from arithmetic alone: per llama.cpp's own maintainers
+# (github.com/ggml-org/llama.cpp/discussions/26736), the attention/compute
+# scratch buffer still scales with context and still consumes VRAM even
+# under --no-kv-offload — moving the *persistent* KV cache to system RAM
+# doesn't make context free of VRAM cost. What the real ceiling should be
+# under no_kv_offload=True requires measuring actual allocation against the
+# real GPU (no ~/.llamacpp/ build or model was available in-session to do
+# that), not more arithmetic, so 24576 is kept as the validated value
+# rather than raised on a guess.
+DRAFT_MODE_MAX_CONTEXT = 24576
 
 
 def _find_server_binary() -> Path | None:
@@ -140,7 +162,7 @@ def is_server_running(url: str = DEFAULT_URL) -> bool:
 def start_server(
     *,
     model_path: Path | None = None,
-    draft_model_path: Path | None = None,
+    draft_model_path: Path | Literal[False] | None = None,
     context: int = DEFAULT_CONTEXT,
     gpu_layers: int = DEFAULT_GPU_LAYERS,
     flash_attn: bool = True,
@@ -159,7 +181,9 @@ def start_server(
             None = auto-detect draft model file and use (default),
             False = disable,
             Path = explicitly use this GGUF as draft.
-        context: Context window size in tokens (reduced to 24576 with draft).
+        context: Context window size in tokens. See DRAFT_MODE_MAX_CONTEXT
+            for how this is capped (never raised) when a draft model is
+            active.
         gpu_layers: Number of layers to offload to GPU (999 = all).
         flash_attn: Enable Flash Attention for faster prompt processing.
         greedy: Use greedy sampling (temp=0, top_k=1) for spec decoding.
@@ -200,12 +224,25 @@ def start_server(
     if draft_model_path is None:
         draft_model_path = _find_draft_model()
 
+    # Cap (never raise) context when a draft model is active — see
+    # DRAFT_MODE_MAX_CONTEXT for the VRAM rationale. A single -c flag is
+    # emitted below with this value; llama-server takes the *last*
+    # occurrence of a repeated flag, so appending a second one later would
+    # silently override whatever was decided here regardless of intent.
+    effective_context = min(context, DRAFT_MODE_MAX_CONTEXT) if draft_model_path else context
+    if effective_context != context:
+        logger.info(
+            "Capping context %d -> %d for speculative decoding (VRAM budget)",
+            context,
+            effective_context,
+        )
+
     cmd = [
         str(server_bin),
         "-m",
         str(model_path),
         "-c",
-        str(context),
+        str(effective_context),
         "--n-gpu-layers",
         str(gpu_layers),
         "--host",
@@ -242,11 +279,8 @@ def start_server(
         cmd.append("0")
         cmd.append("--draft-p-min")
         cmd.append("0.75")
-        # Reduce context to fit both models in 16 GB VRAM.
-        # 14B Q4_K (~8.1 GiB) + 1.5B Q5_K (~1.2 GiB) + KV cache
-        # at 24576 context (~4.5 GiB) = ~13.8 GiB, fits with margin.
-        cmd.append("-c")
-        cmd.append("24576")
+        # Do not append another -c here — see the effective_context
+        # computation above, which already accounts for draft mode.
 
     # Disable auto-fit: user has validated context sizes on this card.
     cmd.append("--fit")
