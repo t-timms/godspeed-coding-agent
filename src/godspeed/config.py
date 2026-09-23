@@ -294,19 +294,48 @@ class BatchSettings(BaseModel):
 
 
 class LayaSettings(BaseModel):
-    """Laya fast permission pre-classifier — advisory only.
+    """Laya fast permission pre-classifier and task-difficulty router — both
+    advisory only.
 
     Laya (https://huggingface.co/convaiinnovations/laya) is a ~421M,
-    non-autoregressive typed-decision model that annotates an ``ASK``-tier
-    shell command with a fast (~33ms) risk read. It never overrides the
-    deterministic permission gate — see ``security/laya_advisor.py``. Requires
-    the ``godspeed[laya]`` extra; silently inert without it regardless of
+    non-autoregressive typed-decision model. It annotates an ``ASK``-tier
+    shell command with a fast (~33ms) destructiveness read
+    (``security/laya_advisor.py``) and can escalate a request's task_type
+    toward the strong-model routing tier when it judges the request harder
+    than the existing tool-based classifier assumed (``llm/router.py``'s
+    ``maybe_escalate_task_type``). Neither ever overrides its respective
+    deterministic base decision — see those modules' docstrings. Requires the
+    ``godspeed[laya]`` extra; silently inert without it regardless of
     ``enabled``.
     """
 
     enabled: bool = False
-    confidence_threshold: float = 0.7
+    # A hand-labeled validation run against the real checkpoint (40 cases
+    # across both question sets) found confidence never approached 0.7 — the
+    # highest observed was 0.64 — so 0.7 silently suppressed almost every
+    # annotation in practice. Neither laya_advisor.py nor router.py currently
+    # hard-gates on this value (both moved to trusting the raw score/
+    # probability instead, see their docstrings); it's kept as a floor for
+    # any future consumer, with a default that reflects what this checkpoint
+    # actually produces rather than an unvalidated guess.
+    confidence_threshold: float = 0.15
     timeout_ms: int = 200
+    # The trivial(0)/easy(1)/moderate(2)/hard(3) score at/above which
+    # maybe_escalate_task_type escalates toward the strong-model tier.
+    # Empirically derived, not the naive label-boundary value of 2.0: the
+    # same validation run found real difficulty scores compress toward the
+    # middle of the scale (moderate/hard requests scored 1.28-2.26; the
+    # highest trivial/easy score observed was 1.48). 1.5 catches more real
+    # escalations than 2.0 would while producing zero false escalations
+    # against that sample. Don't "fix" this back to 2.0 assuming that's more
+    # principled — it measurably isn't, on the data available.
+    #
+    # Not a settled calibration, though: those two ranges overlap in
+    # [1.28, 1.48], so a genuinely hard request scoring in that band (e.g.
+    # 1.35) still silently stays unescalated at 1.5 — the same failure mode
+    # this feature exists to prevent, just less often than at 2.0. Only a
+    # larger validation set narrows that band further.
+    difficulty_escalate_threshold: float = 1.5
 
     model_config = ConfigDict(extra="ignore")
 

@@ -14,11 +14,33 @@ from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
 
 @pytest.fixture(autouse=True)
 def _ensure_logging_enabled() -> None:
-    """Re-enable logging in case a prior test disabled it."""
+    """Re-enable logging in case a prior test disabled it.
+
+    Also resets every ``godspeed``/``godspeed.*`` logger's own level: tests
+    that exercise ``cli._setup_logging()`` (e.g.
+    ``test_cli_more.py::TestSetupLogging``) set
+    ``logging.getLogger("godspeed").level`` as a side effect and never reset
+    it, since Python loggers are global singletons that persist for the
+    whole test session. Left alone, that leaks into every other test under
+    the same namespace that runs afterward — any assertion on INFO/DEBUG
+    log output (e.g. via ``caplog``) would silently see nothing, not
+    because logging failed, but because an unrelated earlier test raised
+    the effective level. Resetting every registered ``godspeed*`` logger
+    (not just the one name that happened to leak so far) closes the whole
+    class of leak: two other test files already do their own local,
+    ad-hoc per-logger resets for this exact reason
+    (test_context/test_coherence_graph_coverage.py,
+    test_context/test_compaction_coverage.py) — evidence it recurs.
+    """
     logging.disable(logging.NOTSET)
     if not logging.root.handlers:
         logging.root.addHandler(logging.StreamHandler())
     logging.root.setLevel(logging.NOTSET)
+    for name, logger in list(logging.Logger.manager.loggerDict.items()):
+        if isinstance(logger, logging.Logger) and (
+            name == "godspeed" or name.startswith("godspeed.")
+        ):
+            logger.setLevel(logging.NOTSET)
 
 
 class MockTool(Tool):
