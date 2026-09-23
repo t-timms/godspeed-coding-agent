@@ -213,9 +213,7 @@ class TestAgentLoopLayaRouting:
     the turn's real request text once."""
 
     @pytest.mark.asyncio
-    async def test_escalates_across_iterations_scored_from_real_request(
-        self, tool_context
-    ) -> None:
+    async def test_escalates_across_iterations_scored_from_real_request(self, tool_context) -> None:
         conversation = Conversation("You are a coding agent.", max_tokens=100_000)
         registry = ToolRegistry()
         registry.register(MockTool(name="file_edit"))
