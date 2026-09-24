@@ -111,6 +111,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **fix(benchmarks): `run_in_loop.py` was UTF-16 and unimportable** — the file
+  was committed as UTF-16LE (since 2026-05-09), so `scripts/validate_driver.py`
+  and the `--agent-in-loop` path of `experiments/swebench_lite/run.py` failed
+  with `source code string cannot contain null bytes`. Re-encoded as UTF-8;
+  `tests/test_source_encoding.py` now fails on any UTF-16/NUL Python source.
+  The runner also dropped `reasoning_effort`, so Qwen3.8 ran at its template
+  default (`xhigh`) regardless of settings; it is now passed to the client.
+
 - **fix(llm): Qwen3.8 was not recognised as thinking-capable** — the model
   match covered only `qwen3.6` / `qwen3-`, so `qwen3.8-*` never received any
   thinking control while its chat template thinks by default at effort
