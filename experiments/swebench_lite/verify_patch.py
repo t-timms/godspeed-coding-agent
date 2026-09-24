@@ -104,7 +104,8 @@ def _windows_to_wsl(p: Path) -> str:
 
 PYTHON_ENV = "GODSPEED_SWEBENCH_PYTHON"
 LEGACY_WSL_PYTHON = "/home/swebench_venv/bin/python3"
-LITE_DATASET = "princeton-nlp/SWE-bench_Lite"
+# swebench 5.x needs the image/eval_script/log_parser fields; the old princeton-nlp/ snapshot lacks them.
+LITE_DATASET = "SWE-bench/SWE-bench_Lite"
 
 
 def _swebench_python(use_wsl: bool) -> str:
