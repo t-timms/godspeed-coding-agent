@@ -122,17 +122,29 @@ _WINDOWS_GIT_BASH_CANDIDATES: tuple[Path, ...] = (
 )
 
 
+SHELL_WRAPPER_ENV = "GODSPEED_SHELL_WRAPPER"
+
+
 def _detect_shell() -> list[str]:
-    """Return the shell command prefix for the current platform (cached, thread-safe)."""
+    """Return the shell command prefix for the current platform (cached, thread-safe).
+
+    On POSIX, ``$GODSPEED_SHELL_WRAPPER`` (an executable invoked as ``WRAPPER -c COMMAND``)
+    replaces ``/bin/bash``. Benchmark runs use it to put every agent command in an isolated
+    namespace (``scripts/agent_shell_isolate.sh``). It is read once and cached, so set it before
+    the first command runs; the wrapper itself may read per-task variables on every call.
+    """
     global _shell_cache
     if _shell_cache is not None:
         return _shell_cache
     with _shell_lock:
         if _shell_cache is None:
-            if platform.system() != "Windows":
-                _shell_cache = ["/bin/bash", "-c"]
-            else:
+            wrapper = os.environ.get(SHELL_WRAPPER_ENV, "").strip()
+            if platform.system() == "Windows":
                 _shell_cache = _detect_windows_shell()
+            elif wrapper:
+                _shell_cache = [wrapper, "-c"]
+            else:
+                _shell_cache = ["/bin/bash", "-c"]
     return _shell_cache
 
 

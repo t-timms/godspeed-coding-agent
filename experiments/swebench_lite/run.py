@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import shutil
@@ -359,7 +360,33 @@ def main() -> int:
         "for benchmark integrity — otherwise the agent could search GitHub for the "
         "ground-truth fix by instance id. Only set for real-world (non-benchmark) runs.",
     )
+    parser.add_argument(
+        "--isolate-agent-shell",
+        action="store_true",
+        help="Run every agent shell command in a private mount+PID namespace where $HOME and /mnt are "
+        "empty and /tmp is per-task (scripts/agent_shell_isolate.sh). Agents have been seen searching "
+        "the host for hidden tests and gold data. Linux only; fails closed. See docs/benchmark_hygiene.md.",
+    )
+    parser.add_argument(
+        "--task-python",
+        default=None,
+        metavar="VERSION",
+        help="Give each task its own throwaway venv on this Python (e.g. 3.9, the version of the "
+        "SWE-bench images) so the agent's pip installs cannot touch Godspeed's venv or leak between "
+        "tasks. Needs uv.",
+    )
     args = parser.parse_args()
+
+    # isolation is a sibling script module; import by path since run.py is run as a script.
+    sys.path.insert(0, str(Path(__file__).parent))
+    import isolation as _iso_module
+
+    if args.isolate_agent_shell:
+        try:
+            _iso_module.check_isolation_available()
+        except _iso_module.IsolationUnavailableError as exc:
+            logger.error("--isolate-agent-shell requested but unavailable: %s", exc)
+            return 2
 
     if args.agent_in_loop and args.verify_retry:
         logger.warning(
@@ -430,30 +457,41 @@ def main() -> int:
                     architect_block=architect_block,
                     in_loop_block=in_loop_block,
                 )
+                iso_ctx = (
+                    _iso_module.task_isolation(
+                        tag=args.out.stem,
+                        instance_id=iid,
+                        python=args.task_python,
+                        isolate_shell=args.isolate_agent_shell,
+                    )
+                    if (args.task_python or args.isolate_agent_shell)
+                    else contextlib.nullcontext()
+                )
                 try:
-                    if args.agent_in_loop:
-                        # run_in_loop is a sibling script module; import by
-                        # path since run.py is typically invoked as a script.
-                        import sys as _sys
+                    with iso_ctx:
+                        if args.agent_in_loop:
+                            # run_in_loop is a sibling script module; import by
+                            # path since run.py is typically invoked as a script.
+                            import sys as _sys
 
-                        _sys.path.insert(0, str(Path(__file__).parent))
-                        from run_in_loop import run_one as _run_one_in_loop
+                            _sys.path.insert(0, str(Path(__file__).parent))
+                            from run_in_loop import run_one as _run_one_in_loop
 
-                        godspeed_payload = _run_one_in_loop(
-                            instance_id=iid,
-                            model=args.model,
-                            prompt=prompt,
-                            project_dir=workspace,
-                            split=args.split,
-                            timeout_s=args.per_task_timeout,
-                            verify_workdir=args.out.parent.resolve(),
-                            max_iterations=40,
-                            tool_set="full" if args.allow_web_search else "local",
-                        )
-                    else:
-                        godspeed_payload = _run_godspeed(
-                            args.model, prompt, workspace, args.per_task_timeout
-                        )
+                            godspeed_payload = _run_one_in_loop(
+                                instance_id=iid,
+                                model=args.model,
+                                prompt=prompt,
+                                project_dir=workspace,
+                                split=args.split,
+                                timeout_s=args.per_task_timeout,
+                                verify_workdir=args.out.parent.resolve(),
+                                max_iterations=40,
+                                tool_set="full" if args.allow_web_search else "local",
+                            )
+                        else:
+                            godspeed_payload = _run_godspeed(
+                                args.model, prompt, workspace, args.per_task_timeout
+                            )
                     if godspeed_payload.get("_shell_exit_code") != 0:
                         metrics["status"] = f"agent_exit_{godspeed_payload.get('_shell_exit_code')}"
                     patch = _capture_patch(base, workspace)
