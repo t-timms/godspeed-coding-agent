@@ -42,6 +42,14 @@ Scores the **final patches** (the last prediction per instance), independently o
 the agent may have called. Empty patches count as unresolved and are never sent to the harness. Reports
 `resolved/n`, the Wilson 95% interval, agent minutes and solved per hour (from the runner's metrics file).
 
+**It fails closed.** A task the harness could not score (`error_ids`, `infra_failure_ids`,
+`incomplete_ids`, or absent from the report) is not "unresolved": it is missing. Counting it as a failure
+would deflate an arm's score whenever, say, Docker Hub rate-limits an image pull mid-run. In that case
+`score` exits 3, writes the details to `<out>.incomplete.json` and does **not** write `<out>`, so a
+resumable driver re-scores instead of treating the draw as finished. `--allow-harness-errors` writes the
+score anyway, with `"complete": false` and `harness_problems` recorded. `ambiguous_failure` (the tests ran but
+the log gave no clear verdict) is recorded but still counts as unresolved.
+
 ## 4. Compare arms as paired data
 
 ```bash
