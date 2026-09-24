@@ -154,6 +154,39 @@ def split_report(report: dict[str, Any], ids: Sequence[str]) -> tuple[list[str],
     return [i for i in ids if i in resolved], [i for i in ids if i not in resolved]
 
 
+# Report keys whose ids mean "the harness could not tell", not "the patch failed".
+_PROBLEM_KEYS: dict[str, str] = {
+    "error": "error_ids",
+    "infra_failure": "infra_failure_ids",
+    "incomplete": "incomplete_ids",
+}
+FATAL_PROBLEMS = ("error", "infra_failure", "incomplete", "unaccounted")
+
+
+def harness_problems(report: dict[str, Any], ids: Sequence[str]) -> dict[str, list[str]]:
+    """Tasks among ``ids`` the harness could not score (only non-empty categories are returned).
+
+    ``error`` / ``infra_failure`` / ``incomplete`` (a failed image pull, a container that never
+    ran) and ``unaccounted`` (in neither the resolved nor the unresolved list) are FATAL: counting
+    them as "unresolved" would silently deflate the score. ``ambiguous_failure`` (tests ran, the
+    log gave no clear pass/fail) is reported but does not block: those patches are still counted
+    as unresolved.
+    """
+    wanted = set(ids)
+
+    def listed(key: str) -> list[str]:
+        value = report.get(key)
+        return [i for i in value if i in wanted] if isinstance(value, list) else []
+
+    problems = {name: listed(key) for name, key in _PROBLEM_KEYS.items()}
+    problems["ambiguous_failure"] = listed("ambiguous_failure_ids")
+    if isinstance(report.get("unresolved_ids"), list):  # this schema accounts for every task
+        seen = set(report.get("resolved_ids", [])) | set(report["unresolved_ids"])
+        seen |= {i for found in problems.values() for i in found}
+        problems["unaccounted"] = [i for i in ids if i not in seen]
+    return {name: found for name, found in problems.items() if found}
+
+
 # --------------------------------------------------------------------------- commands
 
 
@@ -256,6 +289,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     resolved: list[str] = []
+    problems: dict[str, list[str]] = {}
     if with_patch:
         pfile = workdir / f"preds_{args.tag}.jsonl"
         pfile.write_text("".join(json.dumps(predictions[i]) + "\n" for i in with_patch), "utf-8")
@@ -272,10 +306,12 @@ def cmd_score(args: argparse.Namespace) -> int:
         proc = subprocess.run(cmd, cwd=workdir, capture_output=True, text=True, check=False)
         model = predictions[with_patch[0]].get("model_name_or_path", "unknown")
         try:
-            resolved, _ = split_report(read_report(workdir, model, run_id), with_patch)
+            report = read_report(workdir, model, run_id)
         except FileNotFoundError as exc:
             print(f"{exc}\n{proc.stderr[-800:]}", file=sys.stderr)
             return 1
+        resolved, _ = split_report(report, with_patch)
+        problems = harness_problems(report, with_patch)
     k, n = len(resolved), len(ids)
     lo, hi = wilson(k, n)
     walls = [metrics[i]["wall_s"] for i in ids if i in metrics and "wall_s" in metrics[i]]
@@ -290,8 +326,26 @@ def cmd_score(args: argparse.Namespace) -> int:
         "agent_minutes": round(minutes, 2) if minutes is not None else None,
         "solved_per_hour": round(k / (minutes / 60), 2) if minutes else None,
         "per_task": score_table(ids, set(resolved), metrics),
+        "harness_problems": problems,
+        "complete": not any(name in problems for name in FATAL_PROBLEMS),
     }
-    Path(args.out).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    out = Path(args.out)
+    if not result["complete"] and not args.allow_harness_errors:
+        # Fail closed: never leave a score file behind that a resumable driver would treat as final.
+        held = out.with_name(out.stem + ".incomplete.json")
+        held.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        fatal = {name: found for name, found in problems.items() if name in FATAL_PROBLEMS}
+        print(
+            f"SCORING INCOMPLETE: the harness could not score {sum(map(len, fatal.values()))} "
+            f"task(s) {fatal}. They are NOT counted as unresolved; {out} was not written "
+            f"(details: {held}). Fix the cause (often a rate-limited image pull) and re-run, "
+            "or pass --allow-harness-errors.",
+            file=sys.stderr,
+        )
+        return 3
+    out.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    if problems:
+        print(f"WARNING harness problems recorded in {out}: {problems}", file=sys.stderr)
     pct = 100 * k / max(n, 1)
     print(f"{args.tag}: resolved {k}/{n} = {pct:.1f}% (Wilson 95% {100 * lo:.0f}-{100 * hi:.0f}%)")
     return 0
@@ -339,7 +393,14 @@ def cmd_compare(args: argparse.Namespace) -> int:
     for name, *files in args.arm:
         draws = []
         for f in files:
-            draws.append(json.loads(Path(f).read_text(encoding="utf-8")))
+            draw = json.loads(Path(f).read_text(encoding="utf-8"))
+            if draw.get("complete") is False:
+                print(
+                    f"WARNING {f}: scored with harness errors {draw.get('harness_problems')}; "
+                    "those tasks are missing from the resolved set, not failures",
+                    file=sys.stderr,
+                )
+            draws.append(draw)
         arms[name] = draws
     res = compare_arms(arms)
     print(json.dumps(res, indent=2))
@@ -377,6 +438,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--predictions", required=True)
     s.add_argument("--metrics", default=None)
     s.add_argument("--out", required=True)
+    s.add_argument(
+        "--allow-harness-errors",
+        action="store_true",
+        help="write the score even if the harness errored on some tasks (recorded, not counted)",
+    )
     s.set_defaults(func=cmd_score)
 
     c = sub.add_parser("compare", help="paired comparison of two arms over several draws")

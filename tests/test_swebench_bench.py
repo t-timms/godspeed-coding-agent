@@ -120,6 +120,27 @@ class TestHarnessPlumbing:
     def test_split_report(self) -> None:
         assert sb.split_report({"resolved_ids": ["b"]}, ["a", "b", "c"]) == (["b"], ["a", "c"])
 
+    def test_harness_problems_separates_fatal_from_ambiguous(self) -> None:
+        report = {
+            "resolved_ids": ["a"],
+            "unresolved_ids": ["b", "amb"],
+            "error_ids": ["e"],
+            "infra_failure_ids": [],
+            "incomplete_ids": ["inc"],
+            "ambiguous_failure_ids": ["amb"],
+        }
+        got = sb.harness_problems(report, ["a", "b", "amb", "e", "inc", "lost"])
+        assert got == {
+            "error": ["e"],
+            "incomplete": ["inc"],
+            "ambiguous_failure": ["amb"],
+            "unaccounted": ["lost"],
+        }
+        assert set(got) - {"ambiguous_failure"} <= set(sb.FATAL_PROBLEMS)
+
+    def test_a_report_without_the_full_schema_is_not_flagged(self) -> None:
+        assert sb.harness_problems({"resolved_ids": ["a"]}, ["a", "b"]) == {}
+
     @pytest.mark.parametrize(
         ("output", "expected"),
         [
@@ -254,6 +275,54 @@ class TestScoreCommand:
         assert sb.main(["score", "--tag", "z", "--predictions", str(preds), "--out", str(out),
                         "--workdir", str(tmp_path / "w")]) == 0  # fmt: skip
         assert json.loads(out.read_text())["resolved_count"] == 0
+
+    def _run_with_report(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report: dict):
+        preds, metrics = self._inputs(tmp_path)
+
+        def run(cmd, cwd=None, **kwargs):
+            Path(cwd, "openai__m.posthoc_x.json").write_text(json.dumps(report))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(sb.subprocess, "run", run)
+        out = tmp_path / "score.json"
+        args = ["score", "--tag", "x", "--predictions", str(preds), "--metrics", str(metrics),
+                "--ids", "t1", "t2", "t3", "--workdir", str(tmp_path / "w"), "--out", str(out)]  # fmt: skip
+        return out, args
+
+    def test_harness_errors_fail_closed_instead_of_counting_as_unresolved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        report = {"resolved_ids": ["t1"], "unresolved_ids": [], "error_ids": ["t2"]}
+        out, args = self._run_with_report(tmp_path, monkeypatch, report)
+        assert sb.main(args) == 3
+        assert not out.exists()  # a resumable driver must not see a finished score
+        held = json.loads((tmp_path / "score.incomplete.json").read_text())
+        assert held["complete"] is False and held["harness_problems"] == {"error": ["t2"]}
+        assert "NOT counted as unresolved" in capsys.readouterr().err
+
+    def test_allow_harness_errors_writes_the_score_and_records_the_problem(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report = {"resolved_ids": ["t1"], "unresolved_ids": [], "error_ids": ["t2"]}
+        out, args = self._run_with_report(tmp_path, monkeypatch, report)
+        assert sb.main([*args, "--allow-harness-errors"]) == 0
+        res = json.loads(out.read_text())
+        assert res["complete"] is False and res["resolved_count"] == 1
+        assert res["harness_problems"] == {"error": ["t2"]}
+
+    def test_ambiguous_failure_is_recorded_but_does_not_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        report = {
+            "resolved_ids": ["t1"],
+            "unresolved_ids": ["t2"],
+            "ambiguous_failure_ids": ["t2"],
+        }
+        out, args = self._run_with_report(tmp_path, monkeypatch, report)
+        assert sb.main(args) == 0
+        res = json.loads(out.read_text())
+        assert res["complete"] is True
+        assert res["harness_problems"] == {"ambiguous_failure": ["t2"]}
 
 
 def _draw(resolved: list[str]) -> dict:
