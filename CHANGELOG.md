@@ -117,6 +117,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `xhigh`. A raw `reasoning_effort` is no longer forwarded to Qwen3.5+ models:
   the Qwen3.8 template raises on any value outside `xhigh|medium|low`.
 
+- **fix(context): tool-call arguments were not counted in the token estimate** —
+  `count_message_tokens` skipped the nested `function` dict of assistant
+  `tool_calls`, so on a hard 32K window (local llama-server) compaction fired
+  after the real context had already overflowed. On 18 real Qwen3.8 requests
+  the estimate was 1.29x too low (median); with this fix 1.11x.
+
 - **CI security scan** — Added `--ignore-vuln CVE-2026-3219` and
   `--ignore-vuln CVE-2026-42561` to pip-audit invocations in `ci.yml`.
   Both are transitive dependencies pinned by upstream libraries with no
