@@ -129,7 +129,11 @@ def _detect_shell() -> list[str]:
         return _shell_cache
     with _shell_lock:
         if _shell_cache is None:
-            if platform.system() != "Windows":
+            wrapper = os.environ.get("GODSPEED_SHELL_WRAPPER", "").strip()
+            if wrapper and platform.system() != "Windows":
+                # Benchmark isolation hook: run every agent command through a wrapper (eval clone only).
+                _shell_cache = [wrapper, "-c"]
+            elif platform.system() != "Windows":
                 _shell_cache = ["/bin/bash", "-c"]
             else:
                 _shell_cache = _detect_windows_shell()
