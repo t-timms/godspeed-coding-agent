@@ -58,8 +58,8 @@ itself cannot resolve in the published Docker images (8 of 23: all five pvlib on
 
 * The agent can call the hidden-test harness as a tool (up to 5 times per task), so these scores are **not
   comparable to leaderboard numbers**. The draws share the same 8 tasks and are not independent. Per task,
-  the 27B solved at least as many of its 3 draws as KAT on every task and strictly more on 5 of 8 (task-level
-  sign test, two-sided p about 0.06): suggestive, not established. KAT's two draws with network access (32K
+  the 27B solved at least as many of its 3 draws as KAT on every task and strictly more on 4 of 8 (the other
+  4 tie; task-level sign test, two-sided p = 0.125): suggestive, not established. KAT's two draws with network access (32K
   and 64K) solved exactly the same four tasks, so its ceiling here is not the context window.
 * Protocol differences between draws: the first 27B draw ran before the filesystem sandbox existed (its
   command log was audited: 1 of 165 shell commands touched anything outside the task workspace), and the
