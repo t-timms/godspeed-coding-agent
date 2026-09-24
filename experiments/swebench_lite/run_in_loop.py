@@ -163,6 +163,7 @@ Do NOT modify test files. Keep edits minimal."""
         timeout=300,  # NIM cold starts can take up to 2 min for large models
         router=router,
         thinking_budget=settings.thinking_budget,
+        reasoning_effort=settings.reasoning_effort,
         max_cost_usd=settings.max_cost_usd,
     )
 
