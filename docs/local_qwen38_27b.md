@@ -54,21 +54,24 @@ itself cannot resolve in the published Docker images (8 of 23: all five pvlib on
 | arm | draws | resolved |
 |---|---|---|
 | Qwen3.8-27B IQ3_XXS (this profile) | 3 (8 tasks each) | 7/8, 6/8, 6/8 = 19/24 (79%, Wilson 95% CI 60-91%) |
-| KAT-Coder REAP-50 Q4_K_M, plain, 32K context | 2 | 4/8, 4/8 = 8/16 (50%, CI 28-72%) |
+| KAT-Coder REAP-50 Q4_K_M, plain (32K, 32K, 64K context) | 3 (8 tasks each) | 4/8, 4/8, 4/8 = 12/24 (50%, CI 31-69%) |
 
 * The agent can call the hidden-test harness as a tool (up to 5 times per task), so these scores are **not
-  comparable to leaderboard numbers**. The draws share the same 8 tasks and are not independent; the
-  27B-vs-KAT difference is suggestive (pooled z-test p about 0.05), not established.
+  comparable to leaderboard numbers**. The draws share the same 8 tasks and are not independent. Per task,
+  the 27B solved at least as many of its 3 draws as KAT on every task and strictly more on 5 of 8 (task-level
+  sign test, two-sided p about 0.06): suggestive, not established. KAT's two draws with network access (32K
+  and 64K) solved exactly the same four tasks, so its ceiling here is not the context window.
 * Protocol differences between draws: the first 27B draw ran before the filesystem sandbox existed (its
   command log was audited: 1 of 165 shell commands touched anything outside the task workspace), and the
-  first KAT draw ran in a sandbox that accidentally had no DNS. The other draws (27B: two, KAT: one) share one
-  protocol: sandboxed, with network.
+  first KAT draw ran in a sandbox that accidentally had no DNS. The other draws (27B: two, KAT: two) share
+  one protocol: sandboxed, with network.
 * `sqlfluff-1733` was unsolved by every draw of both arms; two other tasks flip between draws (about one
   task of noise per draw).
-* Mean wall time per 8-task pass: 26 min (27B, three draws) vs 18 min (KAT, two draws). KAT's plain decode
-  measured 3.4x the 27B's plain and about 2.4x its MTP n=4 speed on synthetic prompts (its real-workload speed
-  was not measured separately), but its trajectories are longer: in the run with network access 5 of its 8
-  tasks ended at the 40-iteration cap.
+* Mean wall time per 8-task pass: 26 min (27B, three draws) vs 22 min (KAT, three draws), i.e. about 14.5
+  vs 11.0 tasks solved per hour of agent time. KAT's plain decode measured 3.4x the 27B's plain and about
+  2.4x its MTP n=4 speed on synthetic prompts (its real-workload speed was not measured separately), but its
+  trajectories are longer and it solves fewer tasks: at 32K with network access 5 of its 8 tasks ended at the
+  40-iteration cap (2 of 8 at 64K).
 
 ## Known issues
 
