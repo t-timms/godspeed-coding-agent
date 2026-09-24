@@ -506,7 +506,7 @@ class GodspeedTextualApp(App):
             elif effective_model.lower().startswith(("llamacpp/", "openai/")):
                 from godspeed.cli import _ensure_llamacpp
 
-                await asyncio.to_thread(_ensure_llamacpp)
+                await asyncio.to_thread(_ensure_llamacpp, None, settings.llamacpp)
 
             if settings.mcp_servers:
                 from godspeed.mcp.client import MCPClient, MCPServerConfig

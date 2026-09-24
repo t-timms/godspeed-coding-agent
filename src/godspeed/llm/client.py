@@ -11,7 +11,7 @@ import threading
 from collections.abc import AsyncGenerator, Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 # Import estimate_cost at module level to avoid scoping issues in async methods
 from godspeed.llm.cost import estimate_cost
@@ -588,6 +588,26 @@ class LLMClient:
     # Models that support Qwen-style thinking via extra_body
     _THINKING_CAPABLE_PREFIXES: frozenset[str] = frozenset({"qwen3.6", "qwen3-"})
 
+    # Qwen3.5+ (3.5 / 3.6 / 3.8 ...) chat templates read `enable_thinking` and
+    # `reasoning_effort` as template kwargs, which llama-server forwards from the
+    # request's `chat_template_kwargs`. Thinking is ON by default at effort
+    # "xhigh" when neither is sent. The 3.8 template accepts only xhigh /
+    # medium / low ("high" is an alias of xhigh) and RAISES on anything else,
+    # so raw user values are normalised here and never forwarded as-is.
+    _QWEN_TEMPLATE_THINKING_RE = re.compile(r"qwen3\.[5-9]")
+    _QWEN_TEMPLATE_EFFORTS: ClassVar[dict[str, str]] = {
+        "low": "low",
+        "minimal": "low",
+        "medium": "medium",
+        "high": "xhigh",
+        "xhigh": "xhigh",
+    }
+    _EFFORT_OFF: frozenset[str] = frozenset({"none", "off", "disabled", "false"})
+    # llama-server has no per-request thinking-token budget, so a numeric
+    # thinking_budget is mapped onto the template's effort tiers.
+    _QWEN_BUDGET_LOW_MAX = 2_048
+    _QWEN_BUDGET_MEDIUM_MAX = 8_192
+
     def _is_anthropic_model(self, model: str | None = None) -> bool:
         """Check if the model is an Anthropic/Claude model."""
         name = (model or self._model_lower).lower() if model else self._model_lower
@@ -596,7 +616,65 @@ class LLMClient:
     def _supports_thinking(self, model: str | None = None) -> bool:
         """Check if the model supports extended thinking mode."""
         name = (model or self._model_lower).lower() if model else self._model_lower
-        return any(prefix in name for prefix in self._THINKING_CAPABLE_PREFIXES)
+        return self._is_qwen_template_model(name) or any(
+            prefix in name for prefix in self._THINKING_CAPABLE_PREFIXES
+        )
+
+    def _is_qwen_template_model(self, model: str | None = None) -> bool:
+        """True for Qwen3.5+ models whose chat template takes thinking kwargs."""
+        name = (model or self._model_lower).lower() if model else self._model_lower
+        return self._QWEN_TEMPLATE_THINKING_RE.search(name) is not None
+
+    def _qwen_template_kwargs(self) -> dict[str, Any] | None:
+        """``chat_template_kwargs`` for a Qwen3.5+ model, or None for the template default.
+
+        ``reasoning_effort`` none/off disables thinking; low/medium/high/xhigh
+        enable it at that effort; otherwise a positive ``thinking_budget``
+        enables it at an effort derived from the budget. Unrecognised effort
+        strings are ignored (the template would raise on them).
+        """
+        effort = (self.reasoning_effort or "").strip().lower()
+        if effort in self._EFFORT_OFF:
+            return {"enable_thinking": False}
+        mapped = self._QWEN_TEMPLATE_EFFORTS.get(effort)
+        if mapped is None and self.thinking_budget > 0:
+            if self.thinking_budget <= self._QWEN_BUDGET_LOW_MAX:
+                mapped = "low"
+            elif self.thinking_budget <= self._QWEN_BUDGET_MEDIUM_MAX:
+                mapped = "medium"
+            else:
+                mapped = "xhigh"
+        if mapped is None:
+            return None
+        return {"enable_thinking": True, "reasoning_effort": mapped}
+
+    def _apply_thinking_params(self, kwargs: dict[str, Any], model: str) -> None:
+        """Add provider-specific thinking / reasoning-effort params to ``kwargs``."""
+        is_qwen_template = self._is_qwen_template_model(model)
+        template_kwargs = self._qwen_template_kwargs() if is_qwen_template else None
+        thinking_forced_off = template_kwargs is not None and not template_kwargs["enable_thinking"]
+
+        # Extended thinking for Anthropic models and Qwen thinking mode
+        if self.thinking_budget > 0 and not thinking_forced_off:
+            if self._is_anthropic_model(model):
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.thinking_budget}
+            elif self._supports_thinking(model):
+                # Qwen3.6 via llama.cpp OpenAI-compatible server uses extra_body
+                kwargs["extra_body"] = {
+                    "thinking": True,
+                    "thinking_budget": self.thinking_budget,
+                }
+
+        if is_qwen_template:
+            # Never forward a raw reasoning_effort to these templates (see
+            # _QWEN_TEMPLATE_EFFORTS); send the normalised template kwargs.
+            if template_kwargs is not None:
+                kwargs.setdefault("extra_body", {})["chat_template_kwargs"] = template_kwargs
+        elif self.reasoning_effort:
+            if "extra_body" in kwargs:
+                kwargs["extra_body"]["reasoning_effort"] = self.reasoning_effort
+            else:
+                kwargs["reasoning_effort"] = self.reasoning_effort
 
     def _check_budget(self) -> None:
         """Raise BudgetExceededError if session cost exceeds the limit."""
@@ -848,22 +926,7 @@ class LLMClient:
                     model,
                 )
 
-        # Extended thinking for Anthropic models and Qwen thinking mode
-        if self.thinking_budget > 0:
-            if self._is_anthropic_model(model):
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.thinking_budget}
-            elif self._supports_thinking(model):
-                # Qwen3.6 via llama.cpp OpenAI-compatible server uses extra_body
-                kwargs["extra_body"] = {
-                    "thinking": True,
-                    "thinking_budget": self.thinking_budget,
-                }
-
-        if self.reasoning_effort:
-            if "extra_body" in kwargs:
-                kwargs["extra_body"]["reasoning_effort"] = self.reasoning_effort
-            else:
-                kwargs["reasoning_effort"] = self.reasoning_effort
+        self._apply_thinking_params(kwargs, model)
 
         response = await _get_litellm().acompletion(**kwargs)
 
@@ -1053,21 +1116,7 @@ class LLMClient:
                     effective,
                 )
 
-        # Extended thinking for Anthropic models and Qwen thinking mode
-        if self.thinking_budget > 0:
-            if self._is_anthropic_model(effective):
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": self.thinking_budget}
-            elif self._supports_thinking(effective):
-                kwargs["extra_body"] = {
-                    "thinking": True,
-                    "thinking_budget": self.thinking_budget,
-                }
-
-        if self.reasoning_effort:
-            if "extra_body" in kwargs:
-                kwargs["extra_body"]["reasoning_effort"] = self.reasoning_effort
-            else:
-                kwargs["reasoning_effort"] = self.reasoning_effort
+        self._apply_thinking_params(kwargs, effective)
 
         _running_input_tokens = 0
         _running_output_tokens = 0

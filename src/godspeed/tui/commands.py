@@ -837,6 +837,7 @@ class Commands:
         Usage:
             /effort                       — show current effort
             /effort low|medium|high       — set effort
+            /effort none                  — disable thinking (Qwen3.5+ local models)
             /effort clear                 — reset to default
         """
         level = args.strip().lower()
@@ -848,8 +849,8 @@ class Commands:
             self._llm_client.reasoning_effort = ""
             format_info("Reasoning effort reset to default.")
             return CommandResult(handled=True)
-        if level not in ("low", "medium", "high"):
-            format_error("Usage: /effort low|medium|high|clear")
+        if level not in ("low", "medium", "high", "none"):
+            format_error("Usage: /effort low|medium|high|none|clear")
             return CommandResult(handled=True)
         self._llm_client.reasoning_effort = level
         format_success(f"Reasoning effort set to [{BOLD_PRIMARY}]{level}[/{BOLD_PRIMARY}]")

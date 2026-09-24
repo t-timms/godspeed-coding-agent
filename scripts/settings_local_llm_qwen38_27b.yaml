@@ -1,0 +1,80 @@
+# Godspeed settings for local Qwen3.8-27B (ISTA GSQ-RCO IQ3, MTP) via llama.cpp
+#
+# STATUS: UNVALIDATED on this codebase. Nothing below was benchmarked in
+# Godspeed; every performance number is either quoted from a source or an
+# estimate, and is labelled as such. Run scripts/validate_driver.py against a
+# live server before adding a driver_catalog.yaml entry (that catalog requires
+# a passing validate_driver run).
+#
+# Model file (Apache-2.0), 16 GB-class sizes, from
+#   https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
+#   Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf   10.44 GB  <- used below (KV headroom)
+#   Qwen3.8-27B-GSQ-RCO-IQ3_S-mtp.gguf     12.12 GB     (more accurate, less room)
+# Source-reported quality (ISTA's own eval, LiveCodeBench v6): IQ3_XXS 84.57,
+# IQ3_S 85.71, BF16 85.71. Qwen's own numbers for the base model: SWE-bench Pro
+# 61.7, Terminal-Bench 2.1 73.0 (vendor scaffolds; not comparable to Godspeed's).
+# The "-mtp" files embed the trained multi-token-prediction head (+~0.35 GB).
+#
+# Speed: NOT MEASURED here. Estimate only: bandwidth-bound decode on a 896 GB/s
+# card at ~73-84% efficiency (measured on two other cards) gives ~65-75 tok/s
+# plain for IQ3_XXS; MTP multipliers reported by others range 1.3x-2.8x.
+#
+# llama.cpp: needs a build with MTP (upstream PR #22673, merged 2026-05-16).
+# The pinned b9066 builds predate it and are refused by start_server() with a
+# clear error. Point llamacpp.server_bin (or $GODSPEED_LLAMA_SERVER) at a newer
+# build. On this box the MTP-capable build lives in WSL; Godspeed on Windows
+# cannot launch a Linux binary, so start it there and Godspeed will attach to
+# the running server (is_server_running check) on 127.0.0.1:8080.
+
+model: openai/qwen3.8-27b
+
+fallback_models:
+  - nvidia_nim/moonshotai/kimi-k2.5
+  - nvidia_nim/qwen/qwen3.5-397b-a17b
+
+strong_model: openai/qwen3.8-27b
+cheap_model: openai/qwen3.8-27b
+
+# Qwen3.8 thinks by default at effort "xhigh" (its chat template default).
+# medium is a starting point, UNMEASURED. Change at runtime with
+# /effort none|low|medium|high  (none = thinking off).
+reasoning_effort: medium
+
+# Context: the working range for a 16 GB card. KV for this model is small
+# (16 full-attention layers x 4 KV heads x 256 dim ~= 34 KiB/token at q8_0,
+# computed from the model card => ~1.1 GB at 32K). Compact at 80%.
+max_context_tokens: 32768
+compaction_threshold: 0.8
+
+llamacpp:
+  # server_bin: /path/to/llama-server   # or export GODSPEED_LLAMA_SERVER
+  model_path: ~/.llamacpp/models/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf
+  context: 32768
+  # KV on the GPU: the KV cache is small for this hybrid model, so the old
+  # "KV in system RAM" tuning (made for a 14B dense model) is probably not
+  # needed. UNMEASURED - verify with nvidia-smi on first run; if VRAM is tight
+  # (model 10.4 GB + KV + MTP ~1-2 GB + compute buffers + desktop), lower
+  # context to 24576 or set no_kv_offload: true.
+  no_kv_offload: false
+  kv_cache_type: q8_0
+  # Built-in speculation using the MTP head embedded in the GGUF. start_server
+  # also passes --parallel 1 (the speed-up disappears with more slots).
+  spec_type: draft-mtp
+  spec_draft_n_max: 2   # community-tuned for 16-24 GB cards
+  # reasoning_budget: 4096   # optional server-wide cap on thinking tokens
+  # n_cpu_moe: 0             # MoE models only
+
+# Cost: local inference is free
+max_cost_usd: 0.0
+
+# Agent behavior
+parallel_tool_calls: true
+auto_fix_retries: 3
+
+# Sandbox
+sandbox: none
+
+# Every session is logged to ~/.godspeed/training/*.conversation.jsonl
+# (system, user, assistant + tool_calls + thinking, session_end metrics);
+# export with `godspeed export-training`.
+log_conversations: true
