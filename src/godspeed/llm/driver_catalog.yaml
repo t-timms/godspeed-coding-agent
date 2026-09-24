@@ -160,7 +160,7 @@ drivers:
     tool_call_format: openai
     cost_per_mtok_in: 0.0
     cost_per_mtok_out: 0.0
-    notes: "Qwen3.6-27B UD-Q4_K_XL via llama.cpp. RTX 5070 Ti ~40-55 tok/s. Thinking mode supported via extra_body."
+    notes: "Qwen3.6-27B UD-Q4_K_XL via llama.cpp. RTX 5070 Ti ~40-55 tok/s (UNVERIFIED: no measurement in this repo; a 27B-class UD-Q4_K_XL file is ~17-18 GB, e.g. 17.6 GB for Qwen3.8-27B per Prism ML's table, so it cannot be fully GPU-resident on 16 GB and the figure likely assumed CPU offload). Thinking is controlled via chat_template_kwargs (reasoning_effort / /effort)."
 
   llamacpp/qwen3.6-27b:
     provider: llamacpp

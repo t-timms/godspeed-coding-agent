@@ -380,6 +380,12 @@ class LLMClient:
 
 For Claude models with `thinking_budget > 0`, passes `thinking={"type": "enabled", "budget_tokens": N}` to LiteLLM. The response includes `thinking` content blocks displayed in a collapsed dim panel before the main response. Toggled via `/think [budget]` command.
 
+For local Qwen3.5+ models (`qwen3.5`..`qwen3.9`, e.g. Qwen3.8-27B via llama.cpp), thinking is controlled through the chat template instead: Godspeed sends `chat_template_kwargs` with `enable_thinking` and `reasoning_effort`. `reasoning_effort` (`/effort none|low|medium|high`) maps to the template's `xhigh|medium|low` tiers (`none` turns thinking off; `high` is `xhigh`); with only `thinking_budget` set, the budget maps onto the same tiers (<=2048 low, <=8192 medium, otherwise xhigh). With neither set, the template default applies, which for Qwen3.8 is thinking ON at `xhigh`. llama-server has no per-request token budget; use the server-wide `llamacpp.reasoning_budget` for a hard cap.
+
+### Local llama.cpp Server
+
+When the model is `llamacpp/...` or `openai/...` and no server is running, Godspeed starts `llama-server` itself. The optional `llamacpp:` settings section controls the launch (binary, model, context, KV placement, `spec_type: draft-mtp` for models with an embedded multi-token-prediction head, `n_cpu_moe`, `reasoning_budget`, `extra_args`); the defaults reproduce the original command line. `$GODSPEED_LLAMA_SERVER` overrides binary detection, and the binary's `--help` is checked so a flag it does not know (for example MTP on a build older than upstream PR #22673) is refused with a clear error. A server that is already running is used as-is. See `scripts/settings_local_llm_qwen38_27b.yaml`.
+
 ### Cost Estimation & Budget Enforcement
 
 `llm/cost.py` provides model pricing and cost tracking:
@@ -811,6 +817,12 @@ model_routing:
 
 # Extended thinking (Claude models)
 thinking_budget: 0            # 0 = disabled, N = token budget
+
+# Local llama.cpp server launch (only used when Godspeed starts llama-server itself)
+llamacpp:
+  spec_type: ""               # e.g. draft-mtp for GGUFs with an embedded MTP head
+  n_cpu_moe: 0                # MoE expert layers kept in system RAM
+  no_kv_offload: true         # KV cache in system RAM (original 14B-tuned default)
 
 # Cost management
 max_cost_usd: 0.0            # 0.0 = unlimited

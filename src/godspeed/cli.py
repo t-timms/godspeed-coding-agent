@@ -171,7 +171,10 @@ def _ensure_ollama(console: Any | None = None) -> bool:
 LLAMACPP_STARTUP_TIMEOUT = 60  # seconds to wait for llama.cpp server
 
 
-def _ensure_llamacpp(console: Any | None = None) -> bool:
+def _ensure_llamacpp(
+    console: Any | None = None,
+    llamacpp_settings: Any | None = None,
+) -> bool:
     """Start llama.cpp server if it's not running. Returns True if available.
 
     Configures LiteLLM env vars to route openai/ models to the local server.
@@ -179,10 +182,14 @@ def _ensure_llamacpp(console: Any | None = None) -> bool:
 
     Args:
         console: Optional Rich Console for status output.
+        llamacpp_settings: Optional ``LlamaCppSettings`` (the ``llamacpp:`` config
+            section) controlling how the server is launched — binary, model,
+            MTP speculation, MoE CPU offload. None keeps the manager defaults.
     """
     from godspeed.tools.llamacpp_manager import (
         configure_litellm_env,
         is_server_running,
+        start_kwargs_from_settings,
         start_server,
     )
 
@@ -198,7 +205,10 @@ def _ensure_llamacpp(console: Any | None = None) -> bool:
 
         console.print(f"[{DIM}]  Starting llama.cpp server...[/{DIM}]", end="")
 
-    proc = start_server(timeout=LLAMACPP_STARTUP_TIMEOUT)
+    start_kwargs = (
+        start_kwargs_from_settings(llamacpp_settings) if llamacpp_settings is not None else {}
+    )
+    proc = start_server(timeout=LLAMACPP_STARTUP_TIMEOUT, **start_kwargs)
     if proc is not None or is_server_running():
         if console is not None:
             from godspeed.tui.theme import SUCCESS
@@ -1075,7 +1085,7 @@ async def _headless_run(
     if effective_model.lower().startswith("ollama"):
         _ensure_ollama()
     elif effective_model.lower().startswith(("llamacpp/", "openai/")):
-        _ensure_llamacpp()
+        _ensure_llamacpp(llamacpp_settings=settings.llamacpp)
 
     project_instructions = load_project_instructions(
         effective_project_dir,

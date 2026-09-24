@@ -353,6 +353,38 @@ class MetricsExportSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class LlamaCppSettings(BaseModel):
+    """Launch options for the llama.cpp server Godspeed auto-starts.
+
+    Only consulted when Godspeed starts ``llama-server`` itself — a server that
+    is already running is used as-is. Every default reproduces the original
+    behavior (auto-detected binary and model, KV cache in system RAM, draft-model
+    speculative decoding when a draft GGUF is found).
+
+    ``spec_type`` switches to llama.cpp's built-in speculation instead of a
+    separate draft model, e.g. ``draft-mtp`` for models that ship a trained
+    multi-token-prediction head (Qwen3.5+ MTP GGUFs). ``n_cpu_moe`` keeps the
+    expert weights of the first N layers in system RAM for MoE models that do
+    not fit VRAM. ``reasoning_budget`` is llama-server's server-wide cap on
+    thinking tokens (-1 = unlimited, 0 = immediately end thinking); llama-server
+    has no per-request budget field. ``extra_args`` is appended verbatim as
+    argv entries (never through a shell).
+    """
+
+    server_bin: str = ""
+    model_path: str = ""
+    context: int = Field(default=0, ge=0)  # 0 = manager default
+    no_kv_offload: bool = True
+    kv_cache_type: str = Field(default="q8_0", pattern=r"^[a-z0-9_]+$")
+    spec_type: str = Field(default="", pattern=r"^[a-z0-9-]*$")
+    spec_draft_n_max: int = Field(default=2, ge=1)
+    n_cpu_moe: int = Field(default=0, ge=0)
+    reasoning_budget: int | None = Field(default=None, ge=-1)
+    extra_args: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class GodspeedSettings(BaseModel):
     """Root configuration for Godspeed."""
 
@@ -495,6 +527,7 @@ class GodspeedSettings(BaseModel):
     batch: BatchSettings = Field(default_factory=BatchSettings)
     metrics_export: MetricsExportSettings = Field(default_factory=MetricsExportSettings)
     laya: LayaSettings = Field(default_factory=LayaSettings)
+    llamacpp: LlamaCppSettings = Field(default_factory=LlamaCppSettings)
 
     @model_validator(mode="after")
     def reconcile_sandbox_modes(self) -> GodspeedSettings:
@@ -1081,6 +1114,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset(
         "batch",
         "metrics_export",
         "laya",
+        "llamacpp",
     }
 )
 

@@ -14,15 +14,20 @@ Usage from agent (TUI):
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from godspeed.tools.base import RiskLevel, Tool, ToolContext, ToolResult
+
+if TYPE_CHECKING:
+    from godspeed.config import LlamaCppSettings
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +35,15 @@ DEFAULT_URL = "http://127.0.0.1:8080"
 DEFAULT_API_BASE = f"{DEFAULT_URL}/v1"
 LLAMACPP_API_BASE_ENV = "LLAMACPP_API_BASE"
 
-# Default paths — searched in order
+# Explicit llama-server binary; checked before DEFAULT_SERVER_BINS and PATH.
+LLAMA_SERVER_BIN_ENV = "GODSPEED_LLAMA_SERVER"
+
+# Default paths — searched in order.
+# NOTE: every b9066 entry below predates llama.cpp's multi-token-prediction
+# support (upstream PR #22673, merged 2026-05-16), so those builds reject
+# `--spec-type draft-mtp`. Point GODSPEED_LLAMA_SERVER (or llamacpp.server_bin)
+# at a newer build to use MTP; start_server() checks the binary's --help and
+# refuses to launch with a flag it does not know.
 DEFAULT_MODELS_DIR = Path.home() / ".llamacpp" / "models"
 DEFAULT_SERVER_BINS: list[Path] = [
     # CUDA 12.8 + sm_120a-real + FA build (b9066, Blackwell-optimized)
@@ -75,7 +88,18 @@ DRAFT_MODE_MAX_CONTEXT = 24576
 
 
 def _find_server_binary() -> Path | None:
-    """Locate llama-server binary in common paths."""
+    """Locate the llama-server binary.
+
+    Order: $GODSPEED_LLAMA_SERVER, DEFAULT_SERVER_BINS, then PATH.
+    """
+    override = os.environ.get(LLAMA_SERVER_BIN_ENV, "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.exists():
+            return candidate
+        logger.warning(
+            "%s=%s does not exist; falling back to auto-detection", LLAMA_SERVER_BIN_ENV, override
+        )
     for path in DEFAULT_SERVER_BINS:
         if path.exists():
             return path
@@ -159,8 +183,85 @@ def is_server_running(url: str = DEFAULT_URL) -> bool:
         return False
 
 
+def _build_env() -> dict[str, str]:
+    """Environment for launching llama-server (Blackwell CUDA 12.8 + MMQ tuning)."""
+    env = dict[str, str](os.environ)
+    env.setdefault("GGML_CUDA_GRAPH_OPT", "1")
+    env.setdefault("GGML_CUDA_FA_ALL_QUANTS", "1")
+    env.setdefault("BLACKWELL_NATIVE_FP4", "1")
+    # CUDA_SCALE_LAUNCH_QUEUES=4x reduces CPU-side stall overhead by
+    # increasing CUDA launch queue capacity on Blackwell GPUs.
+    env.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
+    # CUDA 12.8 conda DLL path for runtime linking (cublas64_12, cudart64_12)
+    cuda_bin = Path.home() / "miniconda3" / "envs" / "cuda-build" / "Library" / "bin"
+    if cuda_bin.exists():
+        env["PATH"] = f"{cuda_bin!s};{env.get('PATH', '')}"
+    return env
+
+
+@functools.lru_cache(maxsize=8)
+def _server_help_text(server_bin: str) -> str | None:
+    """Return ``llama-server --help`` output, or None if it cannot be obtained.
+
+    ``--help`` only prints the option table; it does not load a model.
+    """
+    try:
+        proc = subprocess.run(
+            [server_bin, "--help"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            env=_build_env(),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.debug("Could not run %s --help: %s", server_bin, exc)
+        return None
+    return (proc.stdout or "") + (proc.stderr or "") or None
+
+
+def _missing_server_features(server_bin: Path, needles: Sequence[str]) -> list[str]:
+    """Return the ``needles`` absent from the binary's ``--help`` output.
+
+    Returns [] when every needle is present *or* the help text cannot be read
+    (missing DLLs, timeout) — in that case the launch itself reports the problem.
+    """
+    help_text = _server_help_text(str(server_bin))
+    if help_text is None:
+        return []
+    return [needle for needle in needles if needle not in help_text]
+
+
+def start_kwargs_from_settings(cfg: LlamaCppSettings) -> dict[str, Any]:
+    """Translate ``LlamaCppSettings`` into ``start_server`` keyword arguments.
+
+    Unset fields (empty string / 0 / None) are omitted so ``start_server`` keeps
+    its own defaults and auto-detection.
+    """
+    kwargs: dict[str, Any] = {
+        "no_kv_offload": cfg.no_kv_offload,
+        "kv_cache_type": cfg.kv_cache_type,
+        "spec_draft_n_max": cfg.spec_draft_n_max,
+        "n_cpu_moe": cfg.n_cpu_moe,
+        "extra_args": tuple(cfg.extra_args),
+    }
+    if cfg.server_bin:
+        kwargs["server_bin"] = Path(cfg.server_bin).expanduser()
+    if cfg.model_path:
+        kwargs["model_path"] = Path(cfg.model_path).expanduser()
+    if cfg.context:
+        kwargs["context"] = cfg.context
+    if cfg.spec_type:
+        kwargs["spec_type"] = cfg.spec_type
+    if cfg.reasoning_budget is not None:
+        kwargs["reasoning_budget"] = cfg.reasoning_budget
+    return kwargs
+
+
 def start_server(
     *,
+    server_bin: Path | None = None,
     model_path: Path | None = None,
     draft_model_path: Path | Literal[False] | None = None,
     context: int = DEFAULT_CONTEXT,
@@ -172,15 +273,24 @@ def start_server(
     timeout: int = 60,
     no_kv_offload: bool = True,
     kv_cache_type: str = "q8_0",
+    spec_type: str | None = None,
+    spec_draft_n_max: int = 2,
+    n_cpu_moe: int = 0,
+    reasoning_budget: int | None = None,
+    extra_args: Sequence[str] = (),
 ) -> subprocess.Popen[str] | None:
     """Start llama-server with optimizations. Returns process handle or None.
 
     Args:
+        server_bin: Explicit llama-server binary. Auto-detected if None
+            (see _find_server_binary: $GODSPEED_LLAMA_SERVER, known builds, PATH).
         model_path: Path to the GGUF model. Auto-detected if None.
         draft_model_path: Path to draft model for speculative decoding.
             None = auto-detect draft model file and use (default),
             False = disable,
             Path = explicitly use this GGUF as draft.
+            Mutually exclusive with ``spec_type`` (auto-detection is skipped
+            when ``spec_type`` is set; an explicit Path raises ValueError).
         context: Context window size in tokens. See DRAFT_MODE_MAX_CONTEXT
             for how this is capped (never raised) when a draft model is
             active.
@@ -195,12 +305,32 @@ def start_server(
             by 67-82% on 16 GB cards with large models (33B+).
         kv_cache_type: KV cache quantization type. q8_0 is recommended for
             best quality/speed balance with 96 GB system RAM.
+        spec_type: llama.cpp built-in speculation (``--spec-type``), e.g.
+            ``draft-mtp`` for GGUFs that embed a trained MTP head (Qwen3.5+),
+            or ``ngram-mod``. None = off (draft-model logic above applies).
+            For ``draft-mtp`` this also passes ``--parallel 1``: community
+            measurements show the speed-up disappears with more server slots.
+            MTP adds roughly 1-2 GB VRAM (community figure, not measured
+            here) and DRAFT_MODE_MAX_CONTEXT is NOT applied — size ``context``
+            for your model accordingly.
+        spec_draft_n_max: ``--spec-draft-n-max`` for ``draft-*`` spec types.
+            2 is the community-tuned value for 16-24 GB cards.
+        n_cpu_moe: ``--n-cpu-moe N`` — keep the expert weights of the first N
+            layers in system RAM (MoE models that exceed VRAM). 0 = off.
+        reasoning_budget: ``--reasoning-budget`` server-wide thinking-token
+            cap (-1 unlimited, 0 end thinking immediately). None = server default.
+        extra_args: Extra argv entries appended verbatim (no shell involved).
     """
     if is_server_running(f"http://{host}:{port}"):
         logger.info("llama.cpp server already running at %s:%d", host, port)
         return None
 
-    server_bin = _find_server_binary()
+    if spec_type and isinstance(draft_model_path, Path):
+        msg = "draft_model_path and spec_type are mutually exclusive"
+        raise ValueError(msg)
+
+    if server_bin is None:
+        server_bin = _find_server_binary()
     if server_bin is None:
         logger.error(
             "llama-server binary not found. Build llama.cpp first: "
@@ -220,9 +350,34 @@ def start_server(
         )
         return None
 
-    # Auto-detect draft model if explicitly requested
-    if draft_model_path is None:
+    # Built-in speculation (MTP head, n-gram) replaces the separate draft model;
+    # otherwise auto-detect one if not explicitly configured.
+    if spec_type:
+        draft_model_path = False
+    elif draft_model_path is None:
         draft_model_path = _find_draft_model()
+
+    # Refuse to launch with a flag this binary does not know: the pinned b9066
+    # builds predate MTP, and llama-server would otherwise exit with a terse
+    # "invalid argument" after the model path has already been resolved.
+    required: list[str] = []
+    if spec_type:
+        required += ["--spec-type", spec_type]
+    if n_cpu_moe > 0:
+        required.append("--n-cpu-moe")
+    if reasoning_budget is not None:
+        required.append("--reasoning-budget")
+    missing = _missing_server_features(server_bin, required) if required else []
+    if missing:
+        logger.error(
+            "%s does not support %s (per its --help). Its build likely predates the "
+            "feature (MTP merged upstream 2026-05-16, PR #22673) — rebuild llama.cpp "
+            "or point %s / llamacpp.server_bin at a newer binary.",
+            server_bin,
+            ", ".join(missing),
+            LLAMA_SERVER_BIN_ENV,
+        )
+        return None
 
     # Cap (never raise) context when a draft model is active — see
     # DRAFT_MODE_MAX_CONTEXT for the VRAM rationale. A single -c flag is
@@ -282,6 +437,23 @@ def start_server(
         # Do not append another -c here — see the effective_context
         # computation above, which already accounts for draft mode.
 
+    # llama.cpp built-in speculation (e.g. the MTP head embedded in the GGUF).
+    if spec_type:
+        cmd.extend(["--spec-type", spec_type])
+        if spec_type.startswith("draft-"):
+            cmd.extend(["--spec-draft-n-max", str(spec_draft_n_max)])
+        if spec_type == "draft-mtp":
+            # The MTP speed-up vanishes with more than one server slot.
+            cmd.extend(["--parallel", "1"])
+
+    # MoE expert weights of the first N layers stay in system RAM.
+    if n_cpu_moe > 0:
+        cmd.extend(["--n-cpu-moe", str(n_cpu_moe)])
+
+    # Server-wide thinking-token cap (llama-server has no per-request budget).
+    if reasoning_budget is not None:
+        cmd.extend(["--reasoning-budget", str(reasoning_budget)])
+
     # Disable auto-fit: user has validated context sizes on this card.
     cmd.append("--fit")
     cmd.append("off")
@@ -315,26 +487,18 @@ def start_server(
     # Security: disable web UI, bind to localhost only
     cmd.append("--no-webui")
 
+    # User-supplied argv entries go last so they can override the defaults above
+    # (llama-server takes the last occurrence of a repeated flag).
+    cmd.extend(extra_args)
+
     logger.info("Starting llama.cpp server: %s", " ".join(cmd))
     try:
-        # Performance env vars for Blackwell CUDA 12.8 + MMQ
-        env = dict[str, str](os.environ)
-        env.setdefault("GGML_CUDA_GRAPH_OPT", "1")
-        env.setdefault("GGML_CUDA_FA_ALL_QUANTS", "1")
-        env.setdefault("BLACKWELL_NATIVE_FP4", "1")
-        # CUDA_SCALE_LAUNCH_QUEUES=4x reduces CPU-side stall overhead by
-        # increasing CUDA launch queue capacity on Blackwell GPUs.
-        env.setdefault("CUDA_SCALE_LAUNCH_QUEUES", "4x")
-        # CUDA 12.8 conda DLL path for runtime linking (cublas64_12, cudart64_12)
-        cuda_bin = Path.home() / "miniconda3" / "envs" / "cuda-build" / "Library" / "bin"
-        if cuda_bin.exists():
-            env["PATH"] = f"{cuda_bin!s};{env.get('PATH', '')}"
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=env,
+            env=_build_env(),
         )
     except OSError as exc:
         logger.error("Failed to start llama.cpp server: %s", exc)

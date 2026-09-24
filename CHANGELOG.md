@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **feat(llamacpp): `llamacpp:` settings section + MTP / MoE-offload launch options** —
+  New `LlamaCppSettings` (`config.py`) controls how Godspeed auto-starts
+  `llama-server`: `server_bin`, `model_path`, `context`, `no_kv_offload`,
+  `kv_cache_type`, `spec_type`, `spec_draft_n_max`, `n_cpu_moe`,
+  `reasoning_budget`, `extra_args`. `spec_type: draft-mtp` uses the trained
+  multi-token-prediction head embedded in Qwen3.5+ MTP GGUFs (no separate
+  draft model; also passes `--parallel 1`). Defaults reproduce the previous
+  command line exactly. `$GODSPEED_LLAMA_SERVER` overrides binary
+  auto-detection. `start_server()` probes the binary's `--help` and refuses to
+  launch with a flag it does not know, instead of failing after launch (the
+  pinned b9066 builds predate MTP, upstream PR #22673). Example profile:
+  `scripts/settings_local_llm_qwen38_27b.yaml` (unvalidated; numbers in it are
+  labelled sourced / estimated).
+- **feat(llm): Qwen3.5+ thinking control** — `qwen3.5`..`qwen3.9` models get
+  `chat_template_kwargs` (`enable_thinking`, `reasoning_effort`) built from
+  `reasoning_effort` (`none|low|medium|high`) or `thinking_budget` (mapped to
+  effort tiers), the mechanism llama-server documents per request. New
+  `/effort none` disables thinking.
+
 - **Bash-only SWE-bench agent loop** (`experiments/swebench_lite/run_in_loop.sh`) —
   Pure-bash agent runner using curl + jq for tool dispatch. Zero Python
   framework dependency for the agent loop itself.
@@ -91,6 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `.godspeed/history` with Ctrl-R reverse search.
 
 ### Fixed
+
+- **fix(llm): Qwen3.8 was not recognised as thinking-capable** — the model
+  match covered only `qwen3.6` / `qwen3-`, so `qwen3.8-*` never received any
+  thinking control while its chat template thinks by default at effort
+  `xhigh`. A raw `reasoning_effort` is no longer forwarded to Qwen3.5+ models:
+  the Qwen3.8 template raises on any value outside `xhigh|medium|low`.
 
 - **CI security scan** — Added `--ignore-vuln CVE-2026-3219` and
   `--ignore-vuln CVE-2026-42561` to pip-audit invocations in `ci.yml`.

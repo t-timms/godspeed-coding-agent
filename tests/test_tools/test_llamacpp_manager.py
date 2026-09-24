@@ -10,13 +10,19 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from godspeed.config import LlamaCppSettings
 from godspeed.tools.llamacpp_manager import (
     DEFAULT_CONTEXT,
     DRAFT_MODE_MAX_CONTEXT,
+    LLAMA_SERVER_BIN_ENV,
     LlamaCppTool,
+    _find_server_binary,
+    _missing_server_features,
+    _server_help_text,
     configure_litellm_env,
     get_server_status,
     is_server_running,
+    start_kwargs_from_settings,
     start_server,
     stop_server,
 )
@@ -714,6 +720,248 @@ class TestDraftModeContextCapping:
         with caplog.at_level(logging.INFO):
             self._start_and_capture_cmd(context=8192, draft_model_path=Path("/fake/draft.gguf"))
         assert "Capping context" not in caplog.text
+
+
+class TestServerBinaryOverride:
+    """$GODSPEED_LLAMA_SERVER takes precedence over auto-detection."""
+
+    def test_env_var_wins_when_file_exists(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        binary = tmp_path / "llama-server"
+        binary.write_text("#!/bin/sh\n")
+        monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(binary))
+        assert _find_server_binary() == binary
+
+    def test_missing_env_target_falls_back_and_warns(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv(LLAMA_SERVER_BIN_ENV, str(tmp_path / "nope"))
+        with (
+            patch("godspeed.tools.llamacpp_manager.DEFAULT_SERVER_BINS", []),
+            patch("shutil.which", return_value=None),
+            caplog.at_level(logging.WARNING),
+        ):
+            assert _find_server_binary() is None
+        assert LLAMA_SERVER_BIN_ENV in caplog.text
+
+
+class TestServerHelpProbe:
+    """`--help` capability probe used to refuse flags a binary does not know."""
+
+    def setup_method(self) -> None:
+        _server_help_text.cache_clear()
+
+    def teardown_method(self) -> None:
+        _server_help_text.cache_clear()
+
+    def test_combines_stdout_and_stderr(self) -> None:
+        proc = MagicMock(stdout="--spec-type x\n", stderr="--n-cpu-moe N\n")
+        with patch("subprocess.run", return_value=proc):
+            text = _server_help_text("/fake/llama-server")
+        assert text is not None
+        assert "--spec-type" in text
+        assert "--n-cpu-moe" in text
+
+    def test_oserror_returns_none(self) -> None:
+        with patch("subprocess.run", side_effect=FileNotFoundError("nope")):
+            assert _server_help_text("/fake/llama-server") is None
+
+    def test_timeout_returns_none(self) -> None:
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("x", 30)):
+            assert _server_help_text("/fake/llama-server") is None
+
+    def test_missing_features_reports_only_absent_needles(self) -> None:
+        with patch(
+            "godspeed.tools.llamacpp_manager._server_help_text",
+            return_value="--spec-type none,draft-simple\n--n-cpu-moe N\n",
+        ):
+            missing = _missing_server_features(
+                Path("/fake/llama-server"), ["--spec-type", "draft-mtp", "--n-cpu-moe"]
+            )
+        assert missing == ["draft-mtp"]
+
+    def test_unreadable_help_reports_nothing_missing(self) -> None:
+        with patch("godspeed.tools.llamacpp_manager._server_help_text", return_value=None):
+            assert _missing_server_features(Path("/fake/llama-server"), ["--spec-type"]) == []
+
+
+_HELP_WITH_MTP = (
+    "--spec-type none,draft-simple,draft-mtp,ngram-mod\n--n-cpu-moe N\n--reasoning-budget N\n"
+)
+
+
+class _Launch:
+    """Result of running start_server against mocks."""
+
+    def __init__(self) -> None:
+        self.result: Any = None
+        self.popen: MagicMock = MagicMock()
+        self.help_mock: MagicMock = MagicMock()
+        self.find_bin_mock: MagicMock = MagicMock()
+
+    @property
+    def cmd(self) -> list[str]:
+        assert self.popen.call_args is not None, "Popen was never called"
+        cmd: list[str] = self.popen.call_args[0][0]
+        return cmd
+
+
+def _launch(help_text: str | None = _HELP_WITH_MTP, **kwargs: Any) -> _Launch:
+    launch = _Launch()
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    with (
+        patch("godspeed.tools.llamacpp_manager.is_server_running", side_effect=[False, True]),
+        patch(
+            "godspeed.tools.llamacpp_manager._find_server_binary",
+            return_value=Path("/fake/llama-server"),
+        ) as find_bin,
+        patch(
+            "godspeed.tools.llamacpp_manager._find_model",
+            return_value=Path("/fake/model.gguf"),
+        ),
+        patch(
+            "godspeed.tools.llamacpp_manager._find_draft_model",
+            return_value=Path("/fake/auto-draft.gguf"),
+        ),
+        patch(
+            "godspeed.tools.llamacpp_manager._server_help_text", return_value=help_text
+        ) as help_mock,
+        patch("subprocess.Popen", return_value=mock_proc) as popen,
+        patch("godspeed.tools.llamacpp_manager.time.sleep"),
+    ):
+        launch.result = start_server(timeout=1, **kwargs)
+    launch.popen = popen
+    launch.help_mock = help_mock
+    launch.find_bin_mock = find_bin
+    return launch
+
+
+class TestStartServerSpecTypeAndMoe:
+    """MTP / built-in speculation, MoE CPU offload, reasoning budget, extra args."""
+
+    def test_defaults_add_no_new_flags_and_skip_the_help_probe(self) -> None:
+        launch = _launch()
+        counts = _flag_counts(launch.cmd)
+        for flag in ("--spec-type", "--n-cpu-moe", "--reasoning-budget", "--parallel"):
+            assert flag not in counts
+        launch.help_mock.assert_not_called()
+
+    def test_draft_mtp_flags(self) -> None:
+        launch = _launch(spec_type="draft-mtp", spec_draft_n_max=3, context=DEFAULT_CONTEXT)
+        cmd = launch.cmd
+        assert _all_flag_values(cmd, "--spec-type") == ["draft-mtp"]
+        assert _all_flag_values(cmd, "--spec-draft-n-max") == ["3"]
+        assert _all_flag_values(cmd, "--parallel") == ["1"]
+
+    def test_draft_mtp_skips_draft_model_and_greedy_and_context_cap(self) -> None:
+        cmd = _launch(spec_type="draft-mtp", context=DEFAULT_CONTEXT).cmd
+        assert "-md" not in cmd
+        assert "--top-k" not in cmd
+        assert _all_flag_values(cmd, "-c") == [str(DEFAULT_CONTEXT)]
+        assert DEFAULT_CONTEXT > DRAFT_MODE_MAX_CONTEXT
+
+    def test_ngram_spec_type_has_no_draft_n_max_or_parallel(self) -> None:
+        cmd = _launch(spec_type="ngram-mod").cmd
+        assert _all_flag_values(cmd, "--spec-type") == ["ngram-mod"]
+        assert "--spec-draft-n-max" not in cmd
+        assert "--parallel" not in cmd
+
+    def test_spec_type_with_explicit_draft_path_raises(self) -> None:
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            _launch(spec_type="draft-mtp", draft_model_path=Path("/fake/draft.gguf"))
+
+    def test_spec_type_with_draft_disabled_is_fine(self) -> None:
+        launch = _launch(spec_type="draft-mtp", draft_model_path=False)
+        assert launch.result is not None
+
+    def test_n_cpu_moe_flag(self) -> None:
+        cmd = _launch(n_cpu_moe=20).cmd
+        assert _all_flag_values(cmd, "--n-cpu-moe") == ["20"]
+
+    def test_reasoning_budget_zero_is_emitted(self) -> None:
+        """0 means 'end thinking immediately' — it must not be dropped as falsy."""
+        cmd = _launch(reasoning_budget=0).cmd
+        assert _all_flag_values(cmd, "--reasoning-budget") == ["0"]
+
+    def test_reasoning_budget_unlimited(self) -> None:
+        cmd = _launch(reasoning_budget=-1).cmd
+        assert _all_flag_values(cmd, "--reasoning-budget") == ["-1"]
+
+    def test_refuses_binary_that_lacks_requested_feature(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        old_build_help = "--spec-type none,draft-simple\n--n-cpu-moe N\n"
+        with caplog.at_level(logging.ERROR):
+            launch = _launch(help_text=old_build_help, spec_type="draft-mtp")
+        assert launch.result is None
+        launch.popen.assert_not_called()
+        assert "draft-mtp" in caplog.text
+        assert LLAMA_SERVER_BIN_ENV in caplog.text
+
+    def test_unreadable_help_does_not_block_launch(self) -> None:
+        launch = _launch(help_text=None, spec_type="draft-mtp")
+        assert launch.result is not None
+        assert _all_flag_values(launch.cmd, "--spec-type") == ["draft-mtp"]
+
+    def test_extra_args_are_appended_last(self) -> None:
+        cmd = _launch(extra_args=("--foo", "bar")).cmd
+        assert cmd[-2:] == ["--foo", "bar"]
+        assert cmd.index("--no-webui") < cmd.index("--foo")
+
+    def test_explicit_server_bin_bypasses_autodetection(self) -> None:
+        launch = _launch(server_bin=Path("/custom/llama-server"))
+        assert launch.cmd[0] == str(Path("/custom/llama-server"))
+        launch.find_bin_mock.assert_not_called()
+
+
+class TestStartKwargsFromSettings:
+    """LlamaCppSettings -> start_server kwargs."""
+
+    def test_defaults_omit_unset_fields(self) -> None:
+        kwargs = start_kwargs_from_settings(LlamaCppSettings())
+        for key in ("server_bin", "model_path", "context", "spec_type", "reasoning_budget"):
+            assert key not in kwargs
+        assert kwargs["no_kv_offload"] is True
+        assert kwargs["kv_cache_type"] == "q8_0"
+        assert kwargs["n_cpu_moe"] == 0
+        assert kwargs["extra_args"] == ()
+
+    def test_all_fields_mapped(self) -> None:
+        cfg = LlamaCppSettings(
+            server_bin="/opt/llama/llama-server",
+            model_path="/models/q.gguf",
+            context=32768,
+            no_kv_offload=False,
+            kv_cache_type="q4_0",
+            spec_type="draft-mtp",
+            spec_draft_n_max=4,
+            n_cpu_moe=12,
+            reasoning_budget=0,
+            extra_args=["--foo", "bar"],
+        )
+        kwargs = start_kwargs_from_settings(cfg)
+        assert kwargs["server_bin"] == Path("/opt/llama/llama-server")
+        assert kwargs["model_path"] == Path("/models/q.gguf")
+        assert kwargs["context"] == 32768
+        assert kwargs["no_kv_offload"] is False
+        assert kwargs["kv_cache_type"] == "q4_0"
+        assert kwargs["spec_type"] == "draft-mtp"
+        assert kwargs["spec_draft_n_max"] == 4
+        assert kwargs["n_cpu_moe"] == 12
+        assert kwargs["reasoning_budget"] == 0
+        assert kwargs["extra_args"] == ("--foo", "bar")
+
+    def test_mapped_kwargs_drive_start_server(self) -> None:
+        cfg = LlamaCppSettings(spec_type="draft-mtp", context=24576, no_kv_offload=False)
+        cmd = _launch(**start_kwargs_from_settings(cfg)).cmd
+        assert _all_flag_values(cmd, "--spec-type") == ["draft-mtp"]
+        assert "--no-kv-offload" not in cmd
+        assert _all_flag_values(cmd, "-c") == ["24576"]
 
 
 class TestGetServerStatusExtended:

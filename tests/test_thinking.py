@@ -355,3 +355,168 @@ def test_format_thinking_empty():
 
     format_thinking("")  # Should not raise
     format_thinking("   ")  # Whitespace only
+
+
+# ---------------------------------------------------------------------------
+# Qwen3.5+ chat-template thinking control (enable_thinking / reasoning_effort)
+# ---------------------------------------------------------------------------
+
+QWEN38 = "openai/qwen3.8-27b"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "qwen3.8-27b",
+        "openai/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp",
+        "llamacpp/qwen3.8-27b",
+        "qwen3.5-35b-a3b",
+        "openai/qwen3.6-27b",
+    ],
+)
+def test_qwen35_plus_models_are_thinking_capable(model: str) -> None:
+    client = LLMClient(model=model)
+    assert client._is_qwen_template_model(model) is True
+    assert client._supports_thinking(model) is True
+
+
+@pytest.mark.parametrize(
+    "model", ["openai/qwen2.5-coder-14b", "gpt-4o", "claude-sonnet-4-20250514", "ollama/llama3.1"]
+)
+def test_other_models_are_not_qwen_template_models(model: str) -> None:
+    client = LLMClient(model=model)
+    assert client._is_qwen_template_model(model) is False
+
+
+def test_legacy_qwen3_dash_prefix_still_thinking_capable_but_not_template() -> None:
+    client = LLMClient(model="ollama/qwen3:4b")
+    assert client._supports_thinking("qwen3-coder-30b") is True
+    assert client._is_qwen_template_model("qwen3-coder-30b") is False
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected"),
+    [
+        ("none", {"enable_thinking": False}),
+        ("off", {"enable_thinking": False}),
+        ("NONE", {"enable_thinking": False}),
+        ("low", {"enable_thinking": True, "reasoning_effort": "low"}),
+        ("minimal", {"enable_thinking": True, "reasoning_effort": "low"}),
+        ("medium", {"enable_thinking": True, "reasoning_effort": "medium"}),
+        ("high", {"enable_thinking": True, "reasoning_effort": "xhigh"}),
+        ("xhigh", {"enable_thinking": True, "reasoning_effort": "xhigh"}),
+    ],
+)
+def test_qwen_effort_maps_to_chat_template_kwargs(effort: str, expected: dict) -> None:
+    client = LLMClient(model=QWEN38, reasoning_effort=effort)
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, QWEN38)
+    assert kwargs == {"extra_body": {"chat_template_kwargs": expected}}
+    # A raw top-level reasoning_effort must never be forwarded to the template.
+    assert "reasoning_effort" not in kwargs
+
+
+def test_qwen_unrecognised_effort_is_dropped_not_forwarded() -> None:
+    """The Qwen3.8 template raises on unknown efforts, so never send them."""
+    client = LLMClient(model=QWEN38, reasoning_effort="extreme")
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, QWEN38)
+    assert kwargs == {}
+
+
+def test_qwen_default_leaves_template_default_untouched() -> None:
+    client = LLMClient(model=QWEN38)
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, QWEN38)
+    assert kwargs == {}
+
+
+@pytest.mark.parametrize(
+    ("budget", "effort"),
+    [
+        (500, "low"),
+        (2048, "low"),
+        (2049, "medium"),
+        (8192, "medium"),
+        (8193, "xhigh"),
+        (10_000, "xhigh"),
+    ],
+)
+def test_qwen_budget_maps_to_effort_tier_and_keeps_legacy_keys(budget: int, effort: str) -> None:
+    client = LLMClient(model=QWEN38, thinking_budget=budget)
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, QWEN38)
+    body = kwargs["extra_body"]
+    assert body["chat_template_kwargs"] == {"enable_thinking": True, "reasoning_effort": effort}
+    assert body["thinking"] is True
+    assert body["thinking_budget"] == budget
+
+
+def test_qwen_explicit_effort_beats_budget_tier() -> None:
+    client = LLMClient(model=QWEN38, thinking_budget=10_000, reasoning_effort="low")
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, QWEN38)
+    assert kwargs["extra_body"]["chat_template_kwargs"]["reasoning_effort"] == "low"
+
+
+def test_qwen_effort_none_suppresses_legacy_thinking_keys() -> None:
+    """effort=none + a budget must not send thinking=True beside enable_thinking=False."""
+    client = LLMClient(model=QWEN38, thinking_budget=10_000, reasoning_effort="none")
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, QWEN38)
+    assert kwargs == {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}}
+
+
+def test_non_qwen_reasoning_effort_passthrough_unchanged() -> None:
+    """Regression guard: OpenAI-style models still get the raw top-level value."""
+    client = LLMClient(model="o3-mini", reasoning_effort="high")
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, "o3-mini")
+    assert kwargs == {"reasoning_effort": "high"}
+
+
+def test_legacy_qwen3_reasoning_effort_goes_into_extra_body() -> None:
+    client = LLMClient(model="qwen3-coder", thinking_budget=1000, reasoning_effort="high")
+    kwargs: dict = {}
+    client._apply_thinking_params(kwargs, "qwen3-coder")
+    assert kwargs["extra_body"] == {
+        "thinking": True,
+        "thinking_budget": 1000,
+        "reasoning_effort": "high",
+    }
+
+
+@pytest.mark.asyncio
+async def test_call_sends_chat_template_kwargs_for_qwen38() -> None:
+    client = LLMClient(model=QWEN38, reasoning_effort="medium")
+    mock_response = MagicMock()
+    mock_response.choices = [
+        MagicMock(
+            message=MagicMock(content="ok", tool_calls=None, thinking=None),
+            finish_reason="stop",
+        )
+    ]
+    mock_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5)
+
+    with patch("godspeed.llm.client._get_litellm") as mock_litellm:
+        mock_litellm.return_value.acompletion = AsyncMock(return_value=mock_response)
+        await client._call(QWEN38, [{"role": "user", "content": "hi"}], None)
+
+        call_kwargs = mock_litellm.return_value.acompletion.call_args[1]
+        assert call_kwargs["extra_body"]["chat_template_kwargs"] == {
+            "enable_thinking": True,
+            "reasoning_effort": "medium",
+        }
+        assert "reasoning_effort" not in call_kwargs
+
+
+def test_effort_command_accepts_none(tmp_path) -> None:
+    """`/effort none` is accepted and stored so Qwen3.5+ thinking can be disabled."""
+    from godspeed.tui.commands import Commands
+
+    client = LLMClient(model=QWEN38)
+    commands = Commands.__new__(Commands)
+    commands._llm_client = client
+    result = commands._cmd_effort("none")
+    assert result.handled is True
+    assert client.reasoning_effort == "none"
