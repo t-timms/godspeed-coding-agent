@@ -64,11 +64,14 @@ configure_litellm_env()
 
 logger = logging.getLogger(__name__)
 
-# Default smoke set — 3 instances chosen for variety + historical
-# resolvability under the Kimi K2.5 + agent-in-loop path.
+# Default smoke set — 3 instances chosen for variety + resolvability under the agent-in-loop path.
+# Each one is checked to be resolved by its GOLD patch in the currently published SWE-bench
+# images (scripts/swebench_bench.py gold-check). pvlib__pvlib-python-1606 used to be here but
+# its gold patch no longer resolves there: the image has NumPy 2, which removed `np.Inf`, so
+# `import pvlib` fails.
 DEFAULT_SMOKE_INSTANCES = [
     "sqlfluff__sqlfluff-2419",  # known-resolvable on Phase 1 smoke
-    "pvlib__pvlib-python-1606",  # known to call verify multiple times
+    "pydicom__pydicom-1256",  # small and fast, gold-verified
     "marshmallow-code__marshmallow-1343",  # smaller, for faster feedback
 ]
 
