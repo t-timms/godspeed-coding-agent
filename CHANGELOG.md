@@ -121,6 +121,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--ignore-vuln CVE-2026-42561` to pip-audit invocations in `ci.yml`.
   Both are transitive dependencies pinned by upstream libraries with no
   satisfiable upgrade path.
+- **fix(benchmarks): agent-in-loop verify oracle works with swebench 5.x** —
+  `verify_patch.py` used a hard-coded, missing venv path, always passed
+  `--cache_level` (removed in swebench 5.x), relied on a dataset file that is
+  not in the repo, and used the `princeton-nlp/SWE-bench_Lite` snapshot that
+  lacks the `image` column swebench 5.x reads. Interpreter is now
+  `$GODSPEED_SWEBENCH_PYTHON` / legacy venv / current interpreter; the flag is
+  probed; the row comes from `SWE-bench/SWE-bench_Lite`.
 
 ## [0.5.0] — 2026-05-08
 
