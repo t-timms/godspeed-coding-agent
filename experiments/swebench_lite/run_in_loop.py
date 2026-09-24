@@ -180,6 +180,7 @@ Do NOT modify test files. Keep edits minimal."""
         model=effective_model,
         max_tokens=settings.max_context_tokens,
         compaction_threshold=settings.compaction_threshold,
+        completion_reserve_tokens=settings.completion_reserve_tokens,
     )
 
     verify_call_count = 0

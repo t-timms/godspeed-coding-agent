@@ -383,6 +383,7 @@ class GodspeedTextualApp(App):
                 max_tokens=settings.max_context_tokens,
                 compaction_threshold=settings.compaction_threshold,
                 conversation_logger=conversation_logger,
+                completion_reserve_tokens=settings.completion_reserve_tokens,
             )
             self._conversation = conversation
 

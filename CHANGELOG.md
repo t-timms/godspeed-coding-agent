@@ -118,6 +118,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **fix(context): compaction now leaves room for the reply and calibrates against the server** —
+  On a hard context window (local llama-server) compaction fired only when the real prompt was
+  already at the limit, the reply was cut off in the middle of a tool call, and llama-server
+  answered HTTP 500 `Failed to parse tool call arguments` on every retry (session lost).
+  `Conversation` now keeps `completion_reserve_tokens` (new setting, default 4096, capped at a
+  quarter of the window) free when deciding to compact, learns the estimate's overhead (template
+  markup, tool schemas, tokenizer drift) from the provider's reported prompt size, and a
+  tool-call parse failure near the limit triggers the existing overflow compaction + retry.
+- **fix(llm): one unsupported optional parameter no longer ends the session** — LiteLLM raising
+  `UnsupportedParamsError` (e.g. `reasoning_effort` on `openai/gpt-oss-20b`) failed every call.
+  The parameter is now dropped with one warning, the call retried once, and the parameter left
+  out of later calls; essential keys (`model`, `messages`, `tools`, ...) are never dropped.
+
 - **fix(agent): guard Qwen3.5+ chat-template failure modes** — Strict Qwen3.5+ templates
   return HTTP 500/400 for any non-first `system` message and for tool calls with empty
   `arguments`. `Conversation.add_system_message` (used to bootstrap resumed sessions from a

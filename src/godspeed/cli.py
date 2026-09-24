@@ -1139,6 +1139,7 @@ async def _headless_run(
         max_tokens=settings.max_context_tokens,
         compaction_threshold=settings.compaction_threshold,
         conversation_logger=conversation_logger,
+        completion_reserve_tokens=settings.completion_reserve_tokens,
     )
 
     # Callbacks — write to stderr for tool activity, keep stdout for result
