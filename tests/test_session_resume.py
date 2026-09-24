@@ -188,12 +188,15 @@ class TestBootstrapInjection:
             {"role": "user", "content": "restored"},
         ]
 
-    def test_add_system_message_injects_marker(self) -> None:
+    def test_add_system_message_merges_marker_into_system_prompt(self) -> None:
+        """Qwen3.5+ templates 500 on any non-first system message, so the marker is
+        merged into the leading system prompt, never appended as a second one."""
         conv = self._conversation()
         conv.add_system_message("[resumed: abc-123]\n\nPrevious session summary:\nFixed bug")
         roles = [m["role"] for m in conv.messages]
-        assert roles == ["system", "system"]
-        assert "[resumed: abc-123]" in conv.messages[-1]["content"]
+        assert roles == ["system"]
+        assert conv.messages[0]["content"].startswith("sys")
+        assert "[resumed: abc-123]" in conv.messages[0]["content"]
 
     def test_bootstrap_with_messages_restores_full_history(self) -> None:
         from godspeed.tui.textual_app import GodspeedTextualApp
@@ -226,10 +229,11 @@ class TestBootstrapInjection:
         app._resume_notice = None
         conv = self._conversation()
         app._apply_resume_bootstrap(conv)
-        assert len(conv.messages) == 2
-        assert conv.messages[-1]["role"] == "system"
-        assert "[resumed: abc-123]" in conv.messages[-1]["content"]
-        assert "Fixed the auth bug" in conv.messages[-1]["content"]
+        # The summary marker rides in the single leading system message.
+        assert len(conv.messages) == 1
+        assert conv.messages[0]["role"] == "system"
+        assert "[resumed: abc-123]" in conv.messages[0]["content"]
+        assert "Fixed the auth bug" in conv.messages[0]["content"]
 
 
 class TestListSessionsCommand:
