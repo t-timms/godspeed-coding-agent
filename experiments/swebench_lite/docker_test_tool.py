@@ -176,6 +176,7 @@ class SWEBenchVerifyTool(Tool):
                 model_patch=diff,
                 workdir=self.workdir,
                 timeout_s=self.timeout_s,
+                split=self.split,
             )
         except subprocess.TimeoutExpired as e:
             return ToolResult.failure(
