@@ -109,6 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversation under a new resumable session id; prompt history persists
   in `.godspeed/history` with Ctrl-R reverse search.
 
+- **docs(llamacpp): Qwen3.8-27B profile now carries measurements, not estimates** —
+  `scripts/settings_local_llm_qwen38_27b.yaml` claimed ~65-75 tok/s plain and
+  1.3x-2.8x from MTP; measured on an RTX 5070 Ti it is 54.6 tok/s plain and
+  ~1.4x (78 tok/s) on real agent requests, with `spec_draft_n_max: 4` the best
+  of 2-6. New `docs/local_qwen38_27b.md` (methods, tables, caveats) and
+  `scripts/serve_qwen38_27b_llamacpp.sh` (the measured launch command).
+
 ### Fixed
 
 - **fix(llm): Qwen3.8 was not recognised as thinking-capable** — the model
