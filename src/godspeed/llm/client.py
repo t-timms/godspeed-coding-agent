@@ -595,17 +595,23 @@ class LLMClient:
     # medium / low ("high" is an alias of xhigh) and RAISES on anything else,
     # so raw user values are normalised here and never forwarded as-is.
     _QWEN_TEMPLATE_THINKING_RE = re.compile(r"qwen3\.[5-9]")
+    #
+    # "low" is honoured when asked for explicitly, but it is NOT a real short
+    # setting on Qwen3.8: Prism ML measured it using about as many reasoning
+    # tokens as the default xhigh (Ternary-Bonsai-2-27B KNOWN_ISSUES). "medium"
+    # is the shortest tier that actually shortens reasoning, so tiers we DERIVE
+    # (the "minimal" alias, and thinking_budget below) never pick "low".
     _QWEN_TEMPLATE_EFFORTS: ClassVar[dict[str, str]] = {
         "low": "low",
-        "minimal": "low",
+        "minimal": "medium",
         "medium": "medium",
         "high": "xhigh",
         "xhigh": "xhigh",
     }
     _EFFORT_OFF: frozenset[str] = frozenset({"none", "off", "disabled", "false"})
-    # llama-server has no per-request thinking-token budget, so a numeric
-    # thinking_budget is mapped onto the template's effort tiers.
-    _QWEN_BUDGET_LOW_MAX = 2_048
+    # llama-server has no per-request thinking-token budget (only the server-wide
+    # --reasoning-budget), so a numeric thinking_budget is mapped onto the
+    # template's effort tiers: small budgets -> medium, larger -> xhigh.
     _QWEN_BUDGET_MEDIUM_MAX = 8_192
 
     def _is_anthropic_model(self, model: str | None = None) -> bool:
@@ -638,12 +644,7 @@ class LLMClient:
             return {"enable_thinking": False}
         mapped = self._QWEN_TEMPLATE_EFFORTS.get(effort)
         if mapped is None and self.thinking_budget > 0:
-            if self.thinking_budget <= self._QWEN_BUDGET_LOW_MAX:
-                mapped = "low"
-            elif self.thinking_budget <= self._QWEN_BUDGET_MEDIUM_MAX:
-                mapped = "medium"
-            else:
-                mapped = "xhigh"
+            mapped = "medium" if self.thinking_budget <= self._QWEN_BUDGET_MEDIUM_MAX else "xhigh"
         if mapped is None:
             return None
         return {"enable_thinking": True, "reasoning_effort": mapped}

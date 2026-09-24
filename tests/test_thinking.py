@@ -401,7 +401,9 @@ def test_legacy_qwen3_dash_prefix_still_thinking_capable_but_not_template() -> N
         ("off", {"enable_thinking": False}),
         ("NONE", {"enable_thinking": False}),
         ("low", {"enable_thinking": True, "reasoning_effort": "low"}),
-        ("minimal", {"enable_thinking": True, "reasoning_effort": "low"}),
+        # "minimal" is not a template value; "low" does not actually shorten on
+        # Qwen3.8, so the alias maps to the shortest EFFECTIVE tier (medium).
+        ("minimal", {"enable_thinking": True, "reasoning_effort": "medium"}),
         ("medium", {"enable_thinking": True, "reasoning_effort": "medium"}),
         ("high", {"enable_thinking": True, "reasoning_effort": "xhigh"}),
         ("xhigh", {"enable_thinking": True, "reasoning_effort": "xhigh"}),
@@ -434,8 +436,10 @@ def test_qwen_default_leaves_template_default_untouched() -> None:
 @pytest.mark.parametrize(
     ("budget", "effort"),
     [
-        (500, "low"),
-        (2048, "low"),
+        # A derived tier never picks "low" (it does not shorten reasoning on Qwen3.8).
+        (1, "medium"),
+        (500, "medium"),
+        (2048, "medium"),
         (2049, "medium"),
         (8192, "medium"),
         (8193, "xhigh"),

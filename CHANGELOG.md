@@ -111,6 +111,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **fix(agent): guard Qwen3.5+ chat-template failure modes** — Strict Qwen3.5+ templates
+  return HTTP 500/400 for any non-first `system` message and for tool calls with empty
+  `arguments`. `Conversation.add_system_message` (used to bootstrap resumed sessions from a
+  summary) now merges into the leading system prompt (or, once messages exist, adds a
+  labelled `user` note) instead of appending a mid-conversation `system` message.
+  `Conversation.add_assistant_message` stores empty/None tool-call arguments as `"{}"`, and
+  `_parse_tool_call` treats them as no arguments instead of dropping a valid zero-argument
+  call as malformed (`json.loads("")`). Regression: `tests/test_qwen38_template_safety.py`.
+- **fix(llm): derived Qwen reasoning-effort tiers no longer pick `low`** — `low` does not
+  reliably shorten Qwen3.8 reasoning (Prism ML measured ~xhigh token use). `thinking_budget`
+  <=8192 now maps to `medium` (was `low` up to 2048) and the `minimal` alias to `medium`;
+  an explicit `reasoning_effort: low` is still honoured.
 - **fix(llm): Qwen3.8 was not recognised as thinking-capable** — the model
   match covered only `qwen3.6` / `qwen3-`, so `qwen3.8-*` never received any
   thinking control while its chat template thinks by default at effort
