@@ -1,10 +1,9 @@
 # Godspeed settings for local Qwen3.8-27B (ISTA GSQ-RCO IQ3, MTP) via llama.cpp
 #
-# STATUS: UNVALIDATED on this codebase. Nothing below was benchmarked in
-# Godspeed; every performance number is either quoted from a source or an
-# estimate, and is labelled as such. Run scripts/validate_driver.py against a
-# live server before adding a driver_catalog.yaml entry (that catalog requires
-# a passing validate_driver run).
+# STATUS: measured on ONE machine on 2026-09-24 (RTX 5070 Ti 16 GB, WSL2, llama.cpp
+# 3173a56); methods, tables and caveats are in docs/local_qwen38_27b.md. Numbers
+# below are what that box did, not promises for other hardware. The catalog still
+# requires a passing scripts/validate_driver.py run before an entry is added.
 #
 # Model file (Apache-2.0), 16 GB-class sizes, from
 #   https://huggingface.co/ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
@@ -15,9 +14,10 @@
 # 61.7, Terminal-Bench 2.1 73.0 (vendor scaffolds; not comparable to Godspeed's).
 # The "-mtp" files embed the trained multi-token-prediction head (+~0.35 GB).
 #
-# Speed: NOT MEASURED here. Estimate only: bandwidth-bound decode on a 896 GB/s
-# card at ~73-84% efficiency (measured on two other cards) gives ~65-75 tok/s
-# plain for IQ3_XXS; MTP multipliers reported by others range 1.3x-2.8x.
+# Speed (measured, q8_0 KV, 32K context): plain decode 54.6 tok/s; MTP n=4 gives
+# ~78 tok/s on real agent requests (1.4x). Synthetic prompts show 101 tok/s and
+# overstate it: real output is mostly reasoning prose, which drafts accept
+# poorly. Peak VRAM 14,128 MiB of 16,303 MiB (includes the desktop's ~1.3-1.9 GB).
 #
 # llama.cpp: needs a build with MTP (upstream PR #22673, merged 2026-05-16).
 # The pinned b9066 builds predate it and are refused by start_server() with a
@@ -36,13 +36,17 @@ strong_model: openai/qwen3.8-27b
 cheap_model: openai/qwen3.8-27b
 
 # Qwen3.8 thinks by default at effort "xhigh" (its chat template default).
-# medium is a starting point, UNMEASURED. Change at runtime with
-# /effort none|low|medium|high  (none = thinking off).
+# medium is what every measured run used (docs/local_qwen38_27b.md); other efforts
+# were not compared. Change at runtime with /effort none|low|medium|high
+# (none = thinking off).
 reasoning_effort: medium
 
 # Context: the working range for a 16 GB card. KV for this model is small
 # (16 full-attention layers x 4 KV heads x 256 dim ~= 34 KiB/token at q8_0,
-# computed from the model card => ~1.1 GB at 32K). Compact at 80%.
+# computed from the model card => ~1.1 GB at 32K). Compact at 80%: Godspeed's token
+# estimate ran ~1.3x below the server's count on real requests (tool_calls were
+# not counted), so on a hard 32K window consider compaction_threshold: 0.7 until
+# your build counts them (see docs/local_qwen38_27b.md).
 max_context_tokens: 32768
 compaction_threshold: 0.8
 
@@ -50,17 +54,17 @@ llamacpp:
   # server_bin: /path/to/llama-server   # or export GODSPEED_LLAMA_SERVER
   model_path: ~/.llamacpp/models/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf
   context: 32768
-  # KV on the GPU: the KV cache is small for this hybrid model, so the old
-  # "KV in system RAM" tuning (made for a 14B dense model) is probably not
-  # needed. UNMEASURED - verify with nvidia-smi on first run; if VRAM is tight
-  # (model 10.4 GB + KV + MTP ~1-2 GB + compute buffers + desktop), lower
-  # context to 24576 or set no_kv_offload: true.
+  # KV on the GPU: measured peak 14,128 MiB at 32K / q8_0 KV with MTP n=4 (of
+  # 16,303 MiB). If VRAM is tighter on your machine, lower context to 24576 or
+  # set kv_cache_type: q4_0 (saves ~1 GiB; quality effect NOT measured).
   no_kv_offload: false
   kv_cache_type: q8_0
   # Built-in speculation using the MTP head embedded in the GGUF. start_server
   # also passes --parallel 1 (the speed-up disappears with more slots).
   spec_type: draft-mtp
-  spec_draft_n_max: 2   # community-tuned for 16-24 GB cards
+  # Measured on real agent requests: n=3 -> 76.4 tok/s, n=4 -> 78.2 tok/s. A
+  # separate DFlash2 drafter ties n=4 on real traffic for ~1 GB more VRAM.
+  spec_draft_n_max: 4
   # reasoning_budget: 4096   # optional server-wide cap on thinking tokens
   # n_cpu_moe: 0             # MoE models only
 
