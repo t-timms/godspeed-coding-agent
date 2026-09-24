@@ -63,7 +63,7 @@ async def _run_one_async(
     # Imports kept local so this module stays cheap to import from run.py
     from godspeed.agent.conversation import Conversation
     from godspeed.agent.loop import agent_loop
-    from godspeed.agent.result import AgentMetrics, ExitReason
+    from godspeed.agent.result import EXIT_REASON_TO_CODE, AgentMetrics, ExitCode, ExitReason
     from godspeed.audit.trail import AuditTrail
     from godspeed.cli import _ensure_ollama
     from godspeed.config import GodspeedSettings
@@ -175,8 +175,19 @@ Do NOT modify test files. Keep edits minimal."""
         llm_client=llm_client,  # type: ignore[arg-type]
     )
 
+    # Benchmark runs generate exactly the trajectories a tuning corpus needs; honour the same
+    # log_conversations switch the CLI does (this runner used to drop them silently).
+    conversation_logger = None
+    if settings.log_conversations:
+        from godspeed.training.conversation_logger import ConversationLogger
+
+        conversation_logger = ConversationLogger(
+            session_id=session_id, output_dir=settings.global_dir / "training"
+        )
+
     conversation = Conversation(
         system_prompt=system_prompt,
+        conversation_logger=conversation_logger,
         model=effective_model,
         max_tokens=settings.max_context_tokens,
         compaction_threshold=settings.compaction_threshold,
@@ -234,6 +245,22 @@ Do NOT modify test files. Keep edits minimal."""
         timed_out = True
         final_text = f"(session exceeded wall-clock timeout of {timeout_s}s)"
         metrics.finalize(ExitReason.TIMEOUT)
+    except BaseException:
+        if conversation_logger is not None:
+            conversation_logger.close()
+        raise
+
+    if conversation_logger is not None:
+        conversation_logger.log_session_end(
+            exit_reason=metrics.exit_reason.value,
+            exit_code=int(EXIT_REASON_TO_CODE.get(metrics.exit_reason, ExitCode.SUCCESS)),
+            iterations_used=metrics.iterations_used,
+            tool_call_count=metrics.tool_call_count,
+            tool_error_count=metrics.tool_error_count,
+            duration_seconds=round(metrics.duration_seconds, 3),
+            cost_usd=llm_client.total_cost_usd,
+        )
+        conversation_logger.close()
 
     audit_trail.record(
         event_type="session_end",
