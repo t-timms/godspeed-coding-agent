@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned b9066 builds predate MTP, upstream PR #22673). Example profile:
   `scripts/settings_local_llm_qwen38_27b.yaml` (unvalidated; numbers in it are
   labelled sourced / estimated).
+- **fix(benchmarks): the in-loop runner now writes conversation logs** — with
+  `log_conversations: true` (the setting the CLI already honoured) `experiments/swebench_lite/
+  run_in_loop.py` created no logger, so every benchmark trajectory was thrown away. It now writes
+  `<global_dir>/training/<session>.conversation.jsonl` including the terminal `session_end` record
+  (exit reason and code), so benchmark runs build the trajectory corpus any later tuning needs.
+
 - **feat(llm): Qwen3.5+ thinking control** — `qwen3.5`..`qwen3.9` models get
   `chat_template_kwargs` (`enable_thinking`, `reasoning_effort`) built from
   `reasoning_effort` (`none|low|medium|high`) or `thinking_budget` (mapped to
