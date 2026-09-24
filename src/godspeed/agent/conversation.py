@@ -90,6 +90,15 @@ class Conversation:
             for tc in tool_calls:
                 entry = dict(tc)
                 entry.setdefault("type", "function")
+                fn = entry.get("function")
+                if isinstance(fn, dict):
+                    args = fn.get("arguments")
+                    # A no-argument call can stream back as "" (or None). Strict chat
+                    # templates (Qwen3.5+) reject empty arguments with HTTP 500/400, so
+                    # store the canonical empty JSON object. Non-empty (even malformed)
+                    # strings are left untouched.
+                    if args is None or (isinstance(args, str) and not args.strip()):
+                        entry["function"] = {**fn, "arguments": "{}"}
                 normalized.append(entry)
             msg["tool_calls"] = normalized
         # NEW: Preserve reasoning_content for DeepSeek V4 multi-turn
@@ -203,15 +212,25 @@ class Conversation:
             self._logger.log_system(content)
 
     def add_system_message(self, content: str) -> None:
-        """Inject an additional system message into the conversation.
+        """Attach extra system-level context to the conversation.
 
         Used to bootstrap resumed sessions with a summary marker (e.g.
         ``[resumed: <id>]``) when the full message history is unavailable.
 
+        Strict chat templates (Qwen3.5+) accept exactly one system message and
+        only as the first message — a later ``system`` message makes the server
+        return HTTP 500. So on an empty conversation the text is merged into the
+        leading system prompt; once messages exist it is added as a clearly
+        labelled ``user`` note instead of a mid-conversation ``system`` message.
+
         Args:
-            content: The system message content to append.
+            content: The context to attach.
         """
-        self._messages.append({"role": "system", "content": content})
+        if not self._messages:
+            base = str(self._system_message.get("content", ""))
+            self.set_system_prompt(f"{base}\n\n{content}" if base else content)
+            return
+        self._messages.append({"role": "user", "content": f"[system note]\n{content}"})
         self._invalidate_caches()
 
     def clear(self) -> None:

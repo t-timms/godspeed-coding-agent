@@ -1511,6 +1511,10 @@ def _parse_tool_call(raw: dict[str, Any]) -> ToolCall | None:
         func = raw.get("function", {})
         name = func.get("name", "")
         args_str = func.get("arguments", "{}")
+        # A no-argument call may stream back as "" or None; json.loads("") would
+        # raise and the (valid) call would be dropped as malformed.
+        if args_str is None or (isinstance(args_str, str) and not args_str.strip()):
+            args_str = "{}"
 
         arguments = json.loads(args_str) if isinstance(args_str, str) else args_str
 
