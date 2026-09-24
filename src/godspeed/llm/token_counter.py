@@ -54,25 +54,41 @@ def count_tokens(text: str, model: str = "gpt-4") -> int:
     return len(enc.encode(text))
 
 
+def _collect_strings(value: Any, out: list[str]) -> int:
+    """Collect every non-empty string inside ``value`` into ``out``; return the image-block count.
+
+    Recurses through lists and dicts so nested payloads count too -- notably assistant
+    ``tool_calls`` (``{"function": {"name": ..., "arguments": "..."}}``), whose arguments can be
+    the bulk of a tool-heavy session. ``image_url`` blocks are not encoded; they are counted so the
+    caller can add a flat per-image estimate.
+    """
+    if isinstance(value, str):
+        if value:
+            out.append(value)
+        return 0
+    if isinstance(value, list):
+        return sum(_collect_strings(item, out) for item in value)
+    if isinstance(value, dict):
+        if value.get("type") == "image_url":
+            return 1
+        return sum(_collect_strings(item, out) for item in value.values())
+    return 0
+
+
 def count_message_tokens(messages: list[dict[str, Any]], model: str = "gpt-4") -> int:
-    """Estimate token count for a list of chat messages (batch-encoded)."""
+    """Estimate token count for a list of chat messages (batch-encoded).
+
+    An estimate only: it uses a generic BPE (cl100k) and does not see the chat template's own
+    markup or the tool schemas sent alongside the messages, so callers that need a hard limit
+    (e.g. a local server with a fixed context window) should keep a safety margin.
+    """
     enc = get_encoding(model)
     strings_to_encode: list[str] = []
     image_blocks = 0
 
     for msg in messages:
-        for _, value in msg.items():
-            if isinstance(value, str) and value:
-                strings_to_encode.append(value)
-            elif isinstance(value, list):
-                for item in value:
-                    if isinstance(item, dict):
-                        if item.get("type") == "image_url":
-                            image_blocks += 1
-                            continue
-                        for v in item.values():
-                            if isinstance(v, str) and v:
-                                strings_to_encode.append(v)
+        for value in msg.values():
+            image_blocks += _collect_strings(value, strings_to_encode)
 
     # Batch encode for 3-5x speedup over individual encoding
     token_sum = sum(len(e) for e in enc.encode_ordinary_batch(strings_to_encode))
