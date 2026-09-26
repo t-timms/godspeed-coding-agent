@@ -468,3 +468,76 @@ class TestSpawnCapsAndStagger:
         elapsed = _time.monotonic() - t0
         assert results == ["ok", "ok", "ok"]
         assert elapsed >= 0.08
+
+
+class TestSubAgentContextWindow:
+    """Sub-agents must use the parent session's window and reply reserve.
+
+    They used to read ``getattr(llm_client, "_max_tokens", 100_000)``, an attribute nothing
+    defines, so every sub-agent assumed a 100k window whatever the session was configured for.
+    """
+
+    @staticmethod
+    def _spy(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        import godspeed.agent.coordinator as coordinator_module
+
+        seen: list[dict[str, Any]] = []
+        real = coordinator_module.Conversation
+
+        class _Spy(real):  # type: ignore[valid-type, misc]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                seen.append(kwargs)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(coordinator_module, "Conversation", _Spy)
+        return seen
+
+    @pytest.mark.asyncio
+    async def test_spawn_gets_the_sessions_window_and_reserve(
+        self, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._spy(monkeypatch)
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(return_value=_make_text_response("done"))
+        coord = AgentCoordinator(
+            llm_client=client,
+            tool_registry=ToolRegistry(),
+            tool_context=tool_context,
+            max_context_tokens=32_768,
+            completion_reserve_tokens=4_096,
+        )
+        await coord.spawn("task")
+        assert seen[0]["max_tokens"] == 32_768
+        assert seen[0]["completion_reserve_tokens"] == 4_096
+
+    @pytest.mark.asyncio
+    async def test_retrieval_agent_gets_the_sessions_window_and_reserve(
+        self, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._spy(monkeypatch)
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(return_value=_make_text_response("done"))
+        coord = AgentCoordinator(
+            llm_client=client,
+            tool_registry=ToolRegistry(),
+            tool_context=tool_context,
+            max_context_tokens=32_768,
+            completion_reserve_tokens=4_096,
+        )
+        await coord.spawn_retrieval("where is X defined?")
+        assert seen[0]["max_tokens"] == 32_768
+        assert seen[0]["completion_reserve_tokens"] == 4_096
+
+    @pytest.mark.asyncio
+    async def test_defaults_match_the_settings_default_window_with_no_reserve(
+        self, tool_context: ToolContext, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen = self._spy(monkeypatch)
+        client = LLMClient(model="test")
+        client.chat = AsyncMock(return_value=_make_text_response("done"))
+        coord = AgentCoordinator(
+            llm_client=client, tool_registry=ToolRegistry(), tool_context=tool_context
+        )
+        await coord.spawn("task")
+        assert seen[0]["max_tokens"] == 100_000
+        assert seen[0]["completion_reserve_tokens"] == 0
