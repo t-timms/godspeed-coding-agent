@@ -126,6 +126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   quarter of the window) free when deciding to compact, learns the estimate's overhead (template
   markup, tool schemas, tokenizer drift) from the provider's reported prompt size, and a
   tool-call parse failure near the limit triggers the existing overflow compaction + retry.
+  Sub-agents (`godspeed batch`, `/batch`, the retrieval agent) get the same window and reserve:
+  `AgentCoordinator` read `getattr(llm_client, "_max_tokens", 100_000)`, an attribute no class
+  defines, so every sub-agent assumed a 100k window whatever `max_context_tokens` was set to.
 - **fix(llm): one unsupported optional parameter no longer ends the session** — LiteLLM raising
   `UnsupportedParamsError` (e.g. `reasoning_effort` on `openai/gpt-oss-20b`) failed every call.
   The parameter is now dropped with one warning, the call retried once, and the parameter left

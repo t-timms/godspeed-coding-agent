@@ -808,6 +808,8 @@ def batch_cmd(
         llm_client=llm_client,
         tool_registry=registry,
         tool_context=tool_context,
+        max_context_tokens=settings.max_context_tokens,
+        completion_reserve_tokens=settings.completion_reserve_tokens,
     )
 
     worktree_root = None

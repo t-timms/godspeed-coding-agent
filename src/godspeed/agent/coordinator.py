@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 MAX_SUB_AGENT_DEPTH = 3
 SUB_AGENT_ITERATION_LIMIT = 25
 MAX_PARALLEL_AGENTS = 5
+# Same default as GodspeedSettings.max_context_tokens; callers pass the session's real value.
+DEFAULT_SUB_AGENT_CONTEXT_TOKENS = 100_000
 _SPAWN_ID_LENGTH = 8
 
 
@@ -158,6 +160,8 @@ class AgentCoordinator:
         max_parallel: int = MAX_PARALLEL_AGENTS,
         max_spawns: int = 200,
         stagger_seconds: float = 0.25,
+        max_context_tokens: int = DEFAULT_SUB_AGENT_CONTEXT_TOKENS,
+        completion_reserve_tokens: int = 0,
     ) -> None:
         self._llm_client = llm_client
         self._tool_registry = tool_registry
@@ -170,6 +174,11 @@ class AgentCoordinator:
         self._max_spawns = max_spawns
         self._spawn_count = 0
         self._stagger_seconds = stagger_seconds
+        # The parent session's context window and reply reserve. Sub-agents used to read a
+        # `_max_tokens` attribute that no class defines, so they always assumed a 100k window:
+        # on a 32k local server they overflowed the real window long before compaction fired.
+        self._max_context_tokens = max_context_tokens
+        self._completion_reserve_tokens = completion_reserve_tokens
 
     @property
     def total_sub_agent_cost(self) -> float:
@@ -279,7 +288,8 @@ class AgentCoordinator:
         conversation = Conversation(
             system_prompt=system_prompt,
             model=llm_client.model,
-            max_tokens=getattr(llm_client, "_max_tokens", 100_000),
+            max_tokens=self._max_context_tokens,
+            completion_reserve_tokens=self._completion_reserve_tokens,
         )
 
         try:
@@ -346,7 +356,8 @@ class AgentCoordinator:
         conversation = Conversation(
             system_prompt=RETRIEVAL_SYSTEM_PROMPT,
             model=self._llm_client.model,
-            max_tokens=getattr(self._llm_client, "_max_tokens", 100_000),
+            max_tokens=self._max_context_tokens,
+            completion_reserve_tokens=self._completion_reserve_tokens,
         )
 
         retrieval_id = uuid.uuid4().hex[:_SPAWN_ID_LENGTH]
