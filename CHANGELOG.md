@@ -116,6 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of 2-6. New `docs/local_qwen38_27b.md` (methods, tables, caveats) and
   `scripts/serve_qwen38_27b_llamacpp.sh` (the measured launch command).
 
+- **feat(benchmarks): isolate the agent shell and give each task its own venv** — a benchmark
+  agent shares the host filesystem and has been seen searching it for hidden tests and gold data,
+  and pip-installing into the harness venv. New `GODSPEED_SHELL_WRAPPER` hook in the shell tool,
+  `scripts/agent_shell_isolate.sh` (private mount+PID namespace: `$HOME` and `/mnt` empty,
+  per-task `/tmp`, capabilities dropped, DNS kept, fails closed), `experiments/swebench_lite/run.py`
+  flags `--isolate-agent-shell` and `--task-python`, and `scripts/audit_agent_commands.py` to flag
+  commands that leave the workspace. See `docs/benchmark_hygiene.md`.
+
 ### Fixed
 
 - **fix(agent): guard Qwen3.5+ chat-template failure modes** — Strict Qwen3.5+ templates
