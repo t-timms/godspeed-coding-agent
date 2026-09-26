@@ -193,3 +193,94 @@ class TestLoadEnvFilesNoValueLeakInLogs:
             assert secret_value not in full_log  # value NEVER logged
         finally:
             os.environ.pop("NVIDIA_NIM_API_KEY", None)
+
+
+class TestProjectEnvCannotSetExecutionVariables:
+    """A cloned repo's .godspeed/.env is untrusted; it may not change what code runs.
+
+    The shell tool passes os.environ to every agent command and (on POSIX) resolves the shell
+    from GODSPEED_SHELL_WRAPPER, so these keys would otherwise give the repo code execution
+    outside the permission engine.
+    """
+
+    HOSTILE = {
+        "BASH_ENV": "./.godspeed/x.sh",
+        "LD_PRELOAD": "/nonexistent/x.so",
+        "GODSPEED_SHELL_WRAPPER": "./.godspeed/wrapper.sh",
+        "PROMPT_COMMAND": "./.godspeed/x.sh",
+        "PYTHONPATH": "./.godspeed/py",
+        "NODE_OPTIONS": "--require ./x.js",
+        "GIT_SSH_COMMAND": "./x.sh",
+    }
+
+    @staticmethod
+    def _isolate(monkeypatch: pytest.MonkeyPatch, keys: list[str]) -> None:
+        # set-then-delete registers the original (absent) state for restoration at teardown
+        for key in keys:
+            monkeypatch.setenv(key, "placeholder")
+            monkeypatch.delenv(key)
+
+    def _project(self, tmp_path: Path, body: str, name: str = ".env") -> Path:
+        project_dir = tmp_path / "project"
+        (project_dir / ".godspeed").mkdir(parents=True)
+        (project_dir / ".godspeed" / name).write_text(body)
+        return project_dir
+
+    @pytest.mark.parametrize("filename", [".env", ".env.local"])
+    def test_exec_variables_from_a_project_file_are_dropped(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        filename: str,
+    ) -> None:
+        global_dir = tmp_path / "g"
+        global_dir.mkdir()
+        keys = [*self.HOSTILE, "SAFE_API_KEY"]
+        self._isolate(monkeypatch, keys)
+        body = "".join(f"{k}={v}\n" for k, v in self.HOSTILE.items()) + "SAFE_API_KEY=sk-1\n"
+        project_dir = self._project(tmp_path, body, filename)
+        with patch("godspeed._bootstrap.DEFAULT_GLOBAL_DIR", global_dir):
+            loaded = _load_env_files(project_dir=project_dir)
+        for key in self.HOSTILE:
+            assert key not in os.environ, key
+        assert os.environ["SAFE_API_KEY"] == "sk-1"  # ordinary keys still load
+        assert [k for _, ks in loaded for k in ks] == ["SAFE_API_KEY"]
+        assert "BASH_ENV" in caplog.text  # the user is told which names were ignored
+        assert "./.godspeed/x.sh" not in caplog.text  # ... but never the values
+
+    def test_matching_is_case_insensitive_and_covers_loader_prefixes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        global_dir = tmp_path / "g"
+        global_dir.mkdir()
+        keys = ["bash_env", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES", "BASH_FUNC_evil%%"]
+        self._isolate(monkeypatch, keys)
+        project_dir = self._project(tmp_path, "".join(f"{k}=x\n" for k in keys))
+        with patch("godspeed._bootstrap.DEFAULT_GLOBAL_DIR", global_dir):
+            _load_env_files(project_dir=project_dir)
+        for key in keys:
+            assert key not in os.environ, key
+
+    def test_the_users_own_global_file_is_not_filtered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        global_dir = tmp_path / "g"
+        global_dir.mkdir()
+        (global_dir / ".env").write_text("PYTHONPATH=/my/libs\n")
+        self._isolate(monkeypatch, ["PYTHONPATH"])
+        with patch("godspeed._bootstrap.DEFAULT_GLOBAL_DIR", global_dir):
+            _load_env_files(project_dir=None)
+        assert os.environ["PYTHONPATH"] == "/my/libs"
+
+    def test_a_project_file_cannot_override_the_users_global_value(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        global_dir = tmp_path / "g"
+        global_dir.mkdir()
+        (global_dir / ".env").write_text("PYTHONPATH=/my/libs\n")
+        self._isolate(monkeypatch, ["PYTHONPATH"])
+        project_dir = self._project(tmp_path, "PYTHONPATH=/attacker\n")
+        with patch("godspeed._bootstrap.DEFAULT_GLOBAL_DIR", global_dir):
+            _load_env_files(project_dir=project_dir)
+        assert os.environ["PYTHONPATH"] == "/my/libs"
