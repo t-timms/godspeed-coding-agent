@@ -36,11 +36,19 @@ export MASK="${AGENT_MASK-$REAL_HOME:/mnt}"
 export RESOLV="$(readlink -f /etc/resolv.conf 2>/dev/null || true)"
 export STAGE="/dev/shm/agentk_$$"
 export AGENT_VENV="${AGENT_VENV:-}"
-if [ -z "${AGENT_PRIV:-}" ]; then AGENT_PRIV="$(mktemp -d /var/tmp/agent_priv.XXXXXX)"; fi
+made_priv=""
+if [ -z "${AGENT_PRIV:-}" ]; then AGENT_PRIV="$(mktemp -d /var/tmp/agent_priv.XXXXXX)"; made_priv=1; fi
 mkdir -p "$AGENT_PRIV"
 export AGENT_PRIV
 
-exec unshare --user --map-root-user --mount --pid --fork --kill-child --mount-proc \
+# The sandbox runs as a child (not `exec`) so this shell can clean up after it: the staging
+# directory (empty mountpoints on the host's /dev/shm, one per command, never freed otherwise)
+# and a private /tmp this script created itself. A caller-supplied AGENT_PRIV is never removed.
+# The mounts live in the child's namespace and are gone by the time it exits. The exit status
+# of the command is unshare's, and an EXIT trap does not change it.
+trap 'rm -rf "$STAGE"; [ -z "$made_priv" ] || rm -rf "$AGENT_PRIV"' EXIT
+
+unshare --user --map-root-user --mount --pid --fork --kill-child --mount-proc \
   --propagation private /bin/bash -c '
 set -e
 mkdir -p "$STAGE/ws" "$STAGE/priv" "$STAGE/venv"

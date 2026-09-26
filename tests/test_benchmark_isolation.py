@@ -205,6 +205,43 @@ class TestIsolateScript:
         )
         assert out.returncode == 2
 
+    def test_command_exit_status_is_propagated(self, world: dict[str, Path]) -> None:
+        # the sandbox is a child of the script (for cleanup), not an exec: the status must
+        # still be the command's
+        assert _run("exit 7", world["ws"], self._env(world)).returncode == 7
+        assert _run("true", world["ws"], self._env(world)).returncode == 0
+
+    def test_leaves_no_staging_directory_in_dev_shm(self, world: dict[str, Path]) -> None:
+        # One directory per command used to pile up in /dev/shm for the life of the VM. Run the
+        # script under a wrapper that reports its own pid (`exec` keeps it), so the check does
+        # not depend on what other processes create.
+        out = subprocess.run(
+            ["bash", "-c", 'echo $$ >&2; exec bash "$0" -c "$1"', str(SCRIPT), "true"],
+            cwd=world["ws"],
+            env={**os.environ, **self._env(world)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        assert out.returncode == 0, out.stderr
+        pid = out.stderr.splitlines()[0].strip()
+        assert pid.isdigit(), out.stderr
+        assert not Path(f"/dev/shm/agentk_{pid}").exists()
+
+    def test_removes_the_private_tmp_it_created_and_keeps_a_supplied_one(
+        self, world: dict[str, Path]
+    ) -> None:
+        env = self._env(world)
+        supplied = world["priv"]
+        assert _run("true", world["ws"], env).returncode == 0
+        assert supplied.is_dir()  # caller-supplied AGENT_PRIV is never removed
+
+        own = {k: v for k, v in env.items() if k != "AGENT_PRIV"}
+        before = set(Path("/var/tmp").glob("agent_priv.*"))
+        assert _run("echo x > /tmp/f", world["ws"], own).returncode == 0
+        assert set(Path("/var/tmp").glob("agent_priv.*")) - before == set()
+
 
 @needs_userns
 def test_task_venv_is_visible_at_its_own_path_even_under_tmp(tmp_path: Path) -> None:
