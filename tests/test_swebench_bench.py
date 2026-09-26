@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import random
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -199,6 +200,28 @@ class TestGoldCheckCommand:
         assert result["invalid"]["pyvista__pyvista-4315"].startswith("no test output")
         assert seen[0][seen[0].index("-p") + 1] == "gold"
         assert "15/23" in capsys.readouterr().out
+
+    def test_select_with_a_sample_follows_the_documented_rule(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Documented rule: seeded order over ALL ids, first N gold-valid. With --sample M < all
+        # ids, gold-check only runs the first M of that order, and --select must still pick from
+        # the full order, not from a fresh shuffle of the M candidates (which is a different
+        # permutation, so it picked different tasks: 2/8 overlap on the dev split).
+        seed = 20260924
+        full_order = random.Random(seed).sample(sorted(set(DEV)), len(DEV))  # noqa: S311
+        candidates = full_order[:15]
+        expected = [i for i in candidates if i in set(VALID)][:8]
+        assert len(expected) == 8  # the test is only meaningful if the sample holds 8 valid tasks
+        seen: list[list[str]] = []
+        monkeypatch.setattr(sb.subprocess, "run", _fake_run("gold.gs.json", VALID, seen))
+        out = tmp_path / "gold.json"
+        rc = sb.main(
+            ["gold-check", "--ids", *DEV, "--sample", "15", "--seed", str(seed), "--select", "8",
+             "--run-id", "gs", "--workdir", str(tmp_path / "w"), "--out", str(out)]
+        )  # fmt: skip
+        assert rc == 0
+        assert json.loads(out.read_text())["selected"] == expected
 
     def test_missing_report_is_an_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

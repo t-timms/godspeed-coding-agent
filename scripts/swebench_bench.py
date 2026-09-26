@@ -231,7 +231,12 @@ def cmd_gold_check(args: argparse.Namespace) -> int:
         reasons[iid] = classify_failure(text) if text else "no test output (harness error)"
     selected: list[str] = []
     if args.select:
-        selected, _ = preregistered_selection(candidates, valid, args.seed, args.select)
+        # The rule is "seeded order over ALL ids, first N gold-valid". Passing `candidates`
+        # here re-shuffled just the sample into a different permutation, so with --sample M
+        # smaller than the dataset the picks did not follow the documented rule. `valid` is a
+        # subset of the first M of the full order, so this picks the same tasks a full-set
+        # gold-check would have.
+        selected, _ = preregistered_selection(unique, valid, args.seed, args.select)
     result = {
         "dataset": args.dataset,
         "split": args.split,
