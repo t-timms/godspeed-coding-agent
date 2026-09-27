@@ -41,23 +41,91 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return result
 
 
+# Variables that change WHAT CODE RUNS rather than what an API call authenticates with. The shell
+# tool hands ``os.environ`` to every agent command, so a cloned repo's ``.godspeed/.env`` must not
+# be able to set them: ``BASH_ENV`` is sourced by every non-interactive ``bash -c``, ``LD_PRELOAD``
+# is loaded into every process, ``PATH`` decides which ``git`` runs, and
+# ``GODSPEED_SHELL_WRAPPER`` replaces the shell binary outright. ``~/.godspeed/.env`` is the user's
+# own file and is not filtered. This is a denylist of the known interpreter, loader and shell
+# hooks; it cannot promise to name every one, so a project env file remains untrusted input.
+_EXEC_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "PATHEXT",
+        "COMSPEC",
+        "SHELL",
+        "BASH_ENV",
+        "ENV",
+        "IFS",
+        "CDPATH",
+        "PROMPT_COMMAND",
+        "PS4",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONBREAKPOINT",
+        "PYTHONUSERBASE",
+        "NODE_OPTIONS",
+        "NODE_PATH",
+        "PERL5OPT",
+        "PERL5LIB",
+        "RUBYOPT",
+        "RUBYLIB",
+        "CLASSPATH",
+        "JAVA_TOOL_OPTIONS",
+        "JDK_JAVA_OPTIONS",
+        "_JAVA_OPTIONS",
+        "GIT_SSH_COMMAND",
+        "GIT_EXTERNAL_DIFF",
+        "GIT_ASKPASS",
+        "GIT_EXEC_PATH",
+        "GIT_PAGER",
+        "SSH_ASKPASS",
+        "PAGER",
+        "EDITOR",
+        "VISUAL",
+    }
+)
+_EXEC_ENV_PREFIXES = ("LD_", "DYLD_", "BASH_FUNC_", "GODSPEED_SHELL")
+
+
+def _is_exec_env(key: str) -> bool:
+    upper = key.upper()
+    return upper in _EXEC_ENV_NAMES or upper.startswith(_EXEC_ENV_PREFIXES)
+
+
 def _load_env_files(project_dir: Path | None = None) -> list[tuple[Path, list[str]]]:
     candidates: list[Path] = [
         DEFAULT_GLOBAL_DIR / ".env",
         DEFAULT_GLOBAL_DIR / ".env.local",
     ]
+    project_files: list[Path] = []
     if project_dir is not None:
-        candidates.extend(
-            [
-                project_dir / ".godspeed" / ".env",
-                project_dir / ".godspeed" / ".env.local",
-            ]
-        )
+        project_files = [
+            project_dir / ".godspeed" / ".env",
+            project_dir / ".godspeed" / ".env.local",
+        ]
+        candidates.extend(project_files)
 
     resolved: dict[str, str] = {}
     contributions: list[tuple[Path, list[str]]] = []
     for path in candidates:
         parsed = _parse_env_file(path)
+        if path in project_files:
+            blocked = sorted(k for k in parsed if _is_exec_env(k))
+            if blocked:
+                logger.warning(
+                    "Ignoring %d execution-affecting variable(s) in %s: %s. A project env file may "
+                    "set API keys and endpoints, not what code runs; set these in your shell or in "
+                    "~/.godspeed/.env if you really want them.",
+                    len(blocked),
+                    path,
+                    ", ".join(blocked),
+                )
+                parsed = {k: v for k, v in parsed.items() if k not in blocked}
         if not parsed:
             continue
         contributions.append((path, sorted(parsed.keys())))
