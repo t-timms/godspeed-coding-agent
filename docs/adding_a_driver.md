@@ -77,8 +77,9 @@ What it does:
 1. Loads the catalog entry. Warns if missing (not fatal — you can smoke
    before adding to the catalog).
 2. Runs the driver on 3 easy SWE-Bench Lite dev instances
-   (`sqlfluff__sqlfluff-2419`, `pvlib__pvlib-python-1606`,
-   `marshmallow-code__marshmallow-1343`).
+   (`sqlfluff__sqlfluff-2419`, `pydicom__pydicom-1256`,
+   `marshmallow-code__marshmallow-1343`; each one resolves with its gold patch in the
+   current SWE-bench images, see `docs/benchmark_scoring.md`).
 3. Checks gate criteria:
    - **LLM-error rate ≤ 20%** (driver actually answers).
    - **At least 1/3 instances produce real work** (agent isn't stuck).

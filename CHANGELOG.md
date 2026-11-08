@@ -162,6 +162,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `$GODSPEED_SWEBENCH_PYTHON` / legacy venv / current interpreter; the flag is
   probed; the row comes from `SWE-bench/SWE-bench_Lite`.
 
+- **feat(benchmarks): gold-check, pre-registered task selection, post-hoc scoring and paired
+  comparison** — `scripts/swebench_bench.py` runs the gold patch through the official harness
+  first (8 of 23 SWE-bench Lite dev tasks fail even with it in the current images), picks the
+  first N gold-valid tasks of a seeded order fixed in advance, scores final patches post-hoc with
+  Wilson 95% intervals, and compares arms per task with an exact sign test instead of pooling
+  draws of the same tasks. `scripts/validate_driver.py`'s default smoke set no longer contains an
+  unsolvable instance. `score` fails closed: a task the harness could not score (error, infra
+  failure, incomplete, or missing from the report, e.g. a rate-limited image pull) is never counted
+  as "unresolved"; no score file is written (exit 3) unless `--allow-harness-errors` is given, and
+  the problems are recorded in the result. See `docs/benchmark_scoring.md`.
+
 ## [0.5.0] — 2026-05-08
 
 ### Added
