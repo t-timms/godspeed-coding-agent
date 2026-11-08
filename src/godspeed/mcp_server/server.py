@@ -12,9 +12,10 @@ from typing import Any
 from uuid import uuid4
 
 import anyio
+import jsonschema
 import yaml
 from mcp import types
-from mcp.server import NotificationOptions, Server
+from mcp.server import NotificationOptions, Server, ServerRequestContext
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
 
@@ -120,17 +121,53 @@ class GodspeedMCPServer:
             audit=self.audit_trail,
         )
 
-        self.server = Server("godspeed-mcp")
-        self._register_handlers()
+        # mcp 2.x: handlers are constructor arguments with an (ctx, params) signature.
+        self.server = Server(
+            "godspeed-mcp",
+            on_list_tools=self._on_list_tools,
+            on_call_tool=self._on_call_tool,
+        )
 
-    def _register_handlers(self) -> None:
-        @self.server.list_tools()
-        async def list_tools() -> list[types.Tool]:
-            return self.list_mcp_tools()
+    async def _on_list_tools(
+        self,
+        _ctx: ServerRequestContext[Any],
+        _params: types.PaginatedRequestParams | None,
+    ) -> types.ListToolsResult:
+        return types.ListToolsResult(tools=self.list_mcp_tools())
 
-        @self.server.call_tool(validate_input=True)
-        async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
-            return await self.handle_tool_call(name=name, arguments=arguments)
+    async def _on_call_tool(
+        self,
+        _ctx: ServerRequestContext[Any],
+        params: types.CallToolRequestParams,
+    ) -> types.CallToolResult:
+        # mcp 2.x defaults nothing: arguments may be None.
+        arguments = dict(params.arguments or {})
+        error = self.validate_arguments(params.name, arguments)
+        if error is not None:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=error)],
+                is_error=True,
+            )
+        return await self.handle_tool_call(name=params.name, arguments=arguments)
+
+    def validate_arguments(self, name: str, arguments: dict[str, Any]) -> str | None:
+        """Validate arguments against the tool's input schema before anything runs.
+
+        mcp 1.x did this inside ``@server.call_tool(validate_input=True)``; mcp 2.x removed
+        it from the low-level server, so the check lives here. Same contract as 1.x:
+        an invalid call returns an error result, and an unknown tool skips validation
+        and falls through to the permission engine and registry, which reject it.
+        """
+        tool = self.registry.get(name)
+        if tool is None:
+            return None
+        try:
+            jsonschema.validate(instance=arguments, schema=tool.get_schema())
+        except jsonschema.ValidationError as exc:
+            return f"Input validation error: {exc.message}"
+        except jsonschema.SchemaError as exc:
+            return f"Tool schema error: {exc.message}"
+        return None
 
     def list_mcp_tools(self) -> list[types.Tool]:
         """Return all registered Godspeed tools as MCP definitions."""
@@ -167,8 +204,8 @@ class GodspeedMCPServer:
             )
             return types.CallToolResult(
                 content=[types.TextContent(type="text", text=json.dumps(deny_payload))],
-                structuredContent=deny_payload,
-                isError=True,
+                structured_content=deny_payload,
+                is_error=True,
             )
 
         result = await self.registry.dispatch(tool_call, self.tool_context)
@@ -189,12 +226,12 @@ class GodspeedMCPServer:
 
         return types.CallToolResult(
             content=[types.TextContent(type="text", text=redacted_output)],
-            structuredContent={
+            structured_content={
                 "tool": name,
                 "caller": caller,
                 "is_error": result.is_error,
             },
-            isError=result.is_error,
+            is_error=result.is_error,
         )
 
     async def _audit(self, *, outcome: str, detail: dict[str, Any]) -> None:

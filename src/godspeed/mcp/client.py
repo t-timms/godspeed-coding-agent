@@ -226,7 +226,7 @@ class MCPClient:
                 defn = MCPToolDefinition(
                     name=f"mcp_{config.name}_{tool.name}",
                     description=tool.description or f"MCP tool: {tool.name}",
-                    input_schema=(tool.inputSchema if hasattr(tool, "inputSchema") else {}),
+                    input_schema=getattr(tool, "input_schema", None) or {},
                     server_name=config.name,
                 )
                 definitions.append(defn)

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **deps(mcp): migrate to mcp 2.x (`mcp>=2.3.0,<3.0`)** — the low-level server now
+  registers `on_list_tools` / `on_call_tool` as constructor handlers with the v2
+  `(ctx, params)` signature and snake_case result fields (`is_error`,
+  `structured_content`, `input_schema`). mcp 2.x removed `validate_input`, so
+  `GodspeedMCPServer.validate_arguments()` now jsonschema-validates every call
+  before the permission engine or the tool runs (same contract as 1.x: an invalid
+  call returns `Input validation error: ...`; `arguments=None` is treated as `{}`
+  and validated). `jsonschema` is now a direct dependency. Verified end to end:
+  the Godspeed MCP client lists 34 tools from `godspeed serve` over stdio and an
+  invalid `file_read` call is rejected.
+- **deps: lockfile refresh** — `uv lock --upgrade` cleared 77 known
+  vulnerabilities (pip-audit) in 15 packages (#262).
+
 ### Added
 
 - **feat(llamacpp): `llamacpp:` settings section + MTP / MoE-offload launch options** —
