@@ -808,6 +808,8 @@ def batch_cmd(
         llm_client=llm_client,
         tool_registry=registry,
         tool_context=tool_context,
+        max_context_tokens=settings.max_context_tokens,
+        completion_reserve_tokens=settings.completion_reserve_tokens,
     )
 
     worktree_root = None
@@ -1139,6 +1141,7 @@ async def _headless_run(
         max_tokens=settings.max_context_tokens,
         compaction_threshold=settings.compaction_threshold,
         conversation_logger=conversation_logger,
+        completion_reserve_tokens=settings.completion_reserve_tokens,
     )
 
     # Callbacks — write to stderr for tool activity, keep stdout for result

@@ -414,6 +414,10 @@ class GodspeedSettings(BaseModel):
     # Context
     max_context_tokens: int = 100_000
     compaction_threshold: float = 0.8
+    # Tokens kept free for the model's reply when deciding to compact (capped at a quarter of
+    # the window). Matters on hard windows such as a local llama-server, which truncates a reply
+    # that does not fit and cuts a tool call in half.
+    completion_reserve_tokens: int = 4096
 
     # Model routing — map task types to specific models
     routing: dict[str, str] = Field(default_factory=dict)
@@ -609,6 +613,14 @@ class GodspeedSettings(BaseModel):
     def validate_compaction_threshold(cls, v: float) -> float:
         if not 0.0 < v <= 1.0:
             msg = f"compaction_threshold must be between 0 and 1, got {v}"
+            raise ValueError(msg)
+        return v
+
+    @field_validator("completion_reserve_tokens")
+    @classmethod
+    def validate_completion_reserve_tokens(cls, v: int) -> int:
+        if v < 0:
+            msg = f"completion_reserve_tokens must be >= 0, got {v}"
             raise ValueError(msg)
         return v
 
@@ -1076,6 +1088,7 @@ _KNOWN_TOP_LEVEL_KEYS = frozenset(
         "permission_mode",
         "max_context_tokens",
         "compaction_threshold",
+        "completion_reserve_tokens",
         "routing",
         "mcp_servers",
         "hooks",

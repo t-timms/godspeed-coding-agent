@@ -159,6 +159,8 @@ class LLMClient:
         self.total_output_tokens = 0
         self.total_cost_usd: float = 0.0
         self.usage_ledger: UsageLedger = usage_ledger or UsageLedger()
+        # Optional request parameters a provider has rejected (see _acompletion).
+        self._unsupported_params: set[str] = set()
 
     def _record_usage(
         self,
@@ -895,6 +897,55 @@ class LLMClient:
             f"DeepSeek direct call not supported for model: {clean_model}"
         )
 
+    # Request keys that are never dropped: losing one would silently change what is asked.
+    _ESSENTIAL_KWARGS: frozenset[str] = frozenset(
+        {"model", "messages", "timeout", "tools", "tool_choice", "stream"}
+    )
+
+    @classmethod
+    def _rejected_params(cls, exc: Exception, kwargs: dict[str, Any]) -> set[str]:
+        """Names of optional request parameters a provider says it does not support.
+
+        LiteLLM raises ``UnsupportedParamsError`` with a message such as
+        ``openai does not support parameters: ['reasoning_effort'], for model=gpt-oss-20b``.
+        Matched by class name so this also works when LiteLLM is mocked.
+        """
+        if type(exc).__name__ != "UnsupportedParamsError":
+            return set()
+        listed = re.search(r"\[([^\]]*)\]", str(exc))
+        if not listed:
+            return set()
+        names = set(re.findall(r"['\"]([^'\"]+)['\"]", listed.group(1)))
+        return {n for n in names if n in kwargs and n not in cls._ESSENTIAL_KWARGS}
+
+    async def _acompletion(self, kwargs: dict[str, Any]) -> Any:
+        """``litellm.acompletion`` that survives a provider rejecting an optional parameter.
+
+        One rejected parameter (e.g. ``reasoning_effort`` on a model LiteLLM does not list as a
+        reasoning model) used to fail every call and end the session with ``llm_error`` before the
+        model produced a token. Now the parameter is dropped with one warning, the call is retried,
+        and the parameter is left out of later calls. Essential keys are never dropped, and any
+        other error propagates unchanged.
+        """
+        for name in self._unsupported_params:
+            kwargs.pop(name, None)
+        try:
+            return await _get_litellm().acompletion(**kwargs)
+        except Exception as exc:
+            rejected = self._rejected_params(exc, kwargs)
+            if not rejected:
+                raise
+            logger.warning(
+                "Provider rejected optional parameter(s) %s for model=%s; retrying without them "
+                "and leaving them out of later calls",
+                sorted(rejected),
+                kwargs.get("model"),
+            )
+            self._unsupported_params |= rejected
+            for name in rejected:
+                kwargs.pop(name, None)
+            return await _get_litellm().acompletion(**kwargs)
+
     async def _call(
         self,
         model: str,
@@ -929,7 +980,7 @@ class LLMClient:
 
         self._apply_thinking_params(kwargs, model)
 
-        response = await _get_litellm().acompletion(**kwargs)
+        response = await self._acompletion(kwargs)
 
         # Parse response — guard against empty choices list
         if not response.choices:
@@ -1124,7 +1175,7 @@ class LLMClient:
         _streaming_heuristic_cost = 0.0
         _ledger_recorded = False
         try:
-            response = await _get_litellm().acompletion(**kwargs)
+            response = await self._acompletion(kwargs)
             _content_chunks: list[str] = []
             collected_tool_calls: list[dict[str, Any]] = []
 

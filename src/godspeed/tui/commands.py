@@ -1629,6 +1629,8 @@ class Commands:
             llm_client=self._llm_client,
             tool_registry=self._tool_registry,
             tool_context=tool_context,
+            max_context_tokens=self._conversation.max_tokens,
+            completion_reserve_tokens=self._conversation.completion_reserve_tokens,
         )
 
         async def _run() -> None:

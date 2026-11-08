@@ -53,6 +53,7 @@ async def architect_loop(
         system_prompt=ARCHITECT_SYSTEM_PROMPT,
         model=plan_model,
         max_tokens=conversation.max_tokens,
+        completion_reserve_tokens=conversation.completion_reserve_tokens,
     )
 
     # derive(), not with_model(): the swap is unsafe across awaits and

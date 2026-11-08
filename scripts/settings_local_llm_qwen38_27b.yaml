@@ -43,12 +43,13 @@ reasoning_effort: medium
 
 # Context: the working range for a 16 GB card. KV for this model is small
 # (16 full-attention layers x 4 KV heads x 256 dim ~= 34 KiB/token at q8_0,
-# computed from the model card => ~1.1 GB at 32K). Compact at 80%: Godspeed's token
-# estimate ran ~1.3x below the server's count on real requests (tool_calls were
-# not counted), so on a hard 32K window consider compaction_threshold: 0.7 until
-# your build counts them (see docs/local_qwen38_27b.md).
+# computed from the model card => ~1.1 GB at 32K). Compact at 80% of the window
+# minus completion_reserve_tokens (room for one full reply: a hard window cuts a
+# reply that does not fit, mid tool call). Godspeed also calibrates its token
+# estimate against the prompt size the server reports (see docs/local_qwen38_27b.md).
 max_context_tokens: 32768
 compaction_threshold: 0.8
+completion_reserve_tokens: 4096
 
 llamacpp:
   # server_bin: /path/to/llama-server   # or export GODSPEED_LLAMA_SERVER

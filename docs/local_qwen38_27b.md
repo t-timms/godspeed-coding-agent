@@ -78,8 +78,10 @@ itself cannot resolve in the published Docker images (8 of 23: all five pvlib on
 * **Context estimate.** Godspeed's token estimate (tiktoken cl100k) ran 1.29x below the server's true count on
   real Qwen3.8 requests (median), mostly because assistant `tool_calls` were not counted; with a hard 32K
   window compaction at 0.8 (0.8 x 1.29 is about 1.03 of the window) fired only when the real context was
-  already at or past the limit (reply truncated mid tool call, llama-server HTTP 500, session lost). Fixed by counting `tool_calls` (median 1.11x after);
-  until that is in your build, consider `compaction_threshold: 0.7`.
+  already at or past the limit (reply truncated mid tool call, llama-server HTTP 500, session lost). Counting `tool_calls` brought the median to 1.11x. Godspeed now also calibrates the estimate against the
+  prompt size the server reports and keeps `completion_reserve_tokens` (default 4096) free for the reply, so
+  compaction fires while a full turn still fits; a server that still cuts a tool call in half near the limit
+  (HTTP 500 "Failed to parse tool call arguments") triggers compaction and a retry instead of a retry loop.
 * **Benchmark hygiene.** The agent shell shares the host filesystem: during one run a model searched the host
   for hidden tests and gold data. Run benchmark agents in an isolated mount/PID namespace (or container) and
   give each task its own throwaway virtualenv; do not let the agent `pip install` into the harness venv.

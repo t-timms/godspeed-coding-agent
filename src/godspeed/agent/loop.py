@@ -387,6 +387,7 @@ async def agent_loop(
             conversation.add_user_message(acceptance_summary)
 
         # Call LLM (streaming or batch) with retry for transient errors
+        estimated_at_call = conversation.raw_token_count
         llm_t0 = time.monotonic()
         response: ChatResponse | None = None
         last_exc: Exception | None = None
@@ -447,7 +448,9 @@ async def agent_loop(
                         metrics.iterations_used = iteration
                         metrics.finalize(ExitReason.BUDGET_EXCEEDED)
                     return msg
-                if _is_context_overflow(exc) and not state.overflow_compacted:
+                if (
+                    _is_context_overflow(exc) or _is_truncated_tool_call(exc, conversation)
+                ) and not state.overflow_compacted:
                     state.overflow_compacted = True
                     logger.warning(
                         "Context overflow at iteration=%d — compacting and retrying once",
@@ -495,6 +498,7 @@ async def agent_loop(
                 journal.complete_turn(turn_seq, "error", str(last_exc))
             return f"Error: LLM call failed — {last_exc}"
         loop_metrics.record_llm_call(time.monotonic() - llm_t0)
+        _observe_reported_prompt_tokens(conversation, response, estimated_at_call)
         loop_metrics.record_token_count(conversation.token_count)
 
         # Display thinking blocks (extended thinking for Anthropic models)
@@ -1568,6 +1572,36 @@ def _tasks_open(task_store: Any | None, tool_context: ToolContext | None) -> boo
     return bool(AcceptanceContract.load(contract_path).failing_items())
 
 
+def _observe_reported_prompt_tokens(
+    conversation: Conversation, response: ChatResponse, estimated_at_call: int
+) -> None:
+    """Feed the provider's reported prompt size back into the conversation's estimate."""
+    usage = response.usage or {}
+    reported = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+    if isinstance(reported, int) and reported > 0:
+        conversation.observe_prompt_tokens(reported, estimated_at_call)
+
+
+_TRUNCATED_TOOL_CALL_MARKERS = (
+    "failed to parse tool call arguments",
+    "failed to parse tool call",
+)
+
+
+def _is_truncated_tool_call(exc: Exception, conversation: Conversation) -> bool:
+    """A server that ran out of window mid-reply answers with a tool-call parse error.
+
+    llama-server cuts the reply when the window is full and then fails to parse the half-written
+    tool call (HTTP 500, "Failed to parse tool call arguments as JSON"). Retrying resends the
+    same prompt and fails the same way. Only treat it as overflow when the conversation really is
+    near the limit, so a model that emits malformed JSON in a small context is not affected.
+    """
+    text = str(exc).lower()
+    if not any(marker in text for marker in _TRUNCATED_TOOL_CALL_MARKERS):
+        return False
+    return conversation.token_count >= int(conversation.max_tokens * 0.6)
+
+
 def _is_context_overflow(exc: Exception) -> bool:
     """Match provider context-overflow errors (the prompt_too_long family)."""
     if "contextwindowoverflow" in type(exc).__name__.lower():
@@ -1598,7 +1632,7 @@ async def _check_context_and_compact(
     Fires context threshold hooks and uses the GraduatedCompactor when
     available. Falls back to simple LLM compaction otherwise.
     """
-    max_toks = conversation.max_tokens
+    max_toks = conversation.usable_tokens
     toks = conversation.token_count
     pct = toks / max_toks if max_toks > 0 else 0.0
 

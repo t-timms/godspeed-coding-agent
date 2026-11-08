@@ -27,10 +27,18 @@ class Conversation:
         max_tokens: int = 100_000,
         compaction_threshold: float = 0.8,
         conversation_logger: Any | None = None,
+        completion_reserve_tokens: int = 0,
     ) -> None:
         self.model = model
         self.max_tokens = max_tokens
         self.compaction_threshold = compaction_threshold
+        # Room kept free for the model's reply. A hard context window (e.g. a local
+        # llama-server) truncates a reply that does not fit, which cuts a tool call in
+        # half; compaction therefore has to fire while a full turn still fits.
+        self.completion_reserve_tokens = max(0, completion_reserve_tokens)
+        # Tokens the local estimate cannot see (chat-template markup, tool schemas,
+        # tokenizer drift), learned from the provider's reported prompt size.
+        self._prompt_overhead = 0
         self._system_message: dict[str, Any] = {"role": "system", "content": system_prompt}
         self._messages: list[dict[str, Any]] = []
         self._logger = conversation_logger
@@ -52,16 +60,44 @@ class Conversation:
         return self._messages_cache
 
     @property
-    def token_count(self) -> int:
-        """Estimate current token usage (cached, invalidated on mutation)."""
+    def raw_token_count(self) -> int:
+        """Local estimate of the messages alone (cached, invalidated on mutation)."""
         if self._token_count_cache is None:
             self._token_count_cache = count_message_tokens(self.messages, self.model)
         return self._token_count_cache
 
     @property
+    def token_count(self) -> int:
+        """Estimated prompt size: the local estimate plus what the provider showed us it misses."""
+        return self.raw_token_count + self._prompt_overhead
+
+    @property
+    def usable_tokens(self) -> int:
+        """Context budget for the prompt: the window minus the reply reserve.
+
+        The reserve is capped at a quarter of the window so tiny windows stay usable.
+        """
+        reserve = min(self.completion_reserve_tokens, self.max_tokens // 4)
+        return max(1, self.max_tokens - reserve)
+
+    @property
     def is_near_limit(self) -> bool:
         """Check if we're approaching the context limit."""
-        return self.token_count >= int(self.max_tokens * self.compaction_threshold)
+        return self.token_count >= int(self.usable_tokens * self.compaction_threshold)
+
+    def observe_prompt_tokens(self, reported: int, estimated_at_call: int) -> None:
+        """Calibrate the estimate against the prompt size a provider reported.
+
+        ``estimated_at_call`` is :attr:`raw_token_count` of the messages that were sent. The gap
+        is carried forward as a fixed overhead (template markup and tool schemas do not scale
+        with the conversation, so early in a session the overhead can dwarf the estimate). If the
+        estimate already over-counts the overhead is cleared. A reported size above twice the
+        window is ignored as not comparable, and the overhead is capped at half the window.
+        """
+        if reported <= 0 or estimated_at_call <= 0 or reported > 2 * self.max_tokens:
+            return
+        gap = reported - estimated_at_call
+        self._prompt_overhead = 0 if gap < 0 else min(gap, self.max_tokens // 2)
 
     def add_user_message(self, content: str | list[dict[str, Any]]) -> None:
         """Add a user message.
