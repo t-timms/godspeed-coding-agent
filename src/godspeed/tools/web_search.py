@@ -103,7 +103,7 @@ class WebSearchTool(Tool):
 def _search_ddg(query: str, max_results: int) -> list[dict[str, str]]:
     """Search DuckDuckGo HTML endpoint and parse results."""
     data = urllib.parse.urlencode({"q": query}).encode("utf-8")
-    req = urllib.request.Request(  # noqa: S310
+    req = urllib.request.Request(
         _DDG_URL,
         data=data,
         headers={

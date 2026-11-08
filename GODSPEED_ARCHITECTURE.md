@@ -146,9 +146,9 @@ flowchart TD
 
 ```python
 class RiskLevel(StrEnum):
-    READ_ONLY = "read_only"   # Auto-allow, no prompt
-    LOW = "low"               # Ask once, then session-allow
-    HIGH = "high"             # Ask every time (default)
+    READ_ONLY = "read_only"  # Auto-allow, no prompt
+    LOW = "low"  # Ask once, then session-allow
+    HIGH = "high"  # Ask every time (default)
     DESTRUCTIVE = "destructive"  # Deny by default
 ```
 
