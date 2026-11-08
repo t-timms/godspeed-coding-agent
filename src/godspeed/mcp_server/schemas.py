@@ -12,7 +12,7 @@ def tool_to_mcp_tool(tool: Tool) -> types.Tool:
     return types.Tool(
         name=tool.name,
         description=tool.description,
-        inputSchema=tool.get_schema(),
+        input_schema=tool.get_schema(),
     )
 
 

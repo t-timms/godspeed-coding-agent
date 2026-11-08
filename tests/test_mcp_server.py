@@ -215,9 +215,9 @@ class TestHandleToolCall:
             name="file_read", arguments={"file_path": "README.md"}
         )
 
-        assert result.isError is False
+        assert result.is_error is False
         assert result.content[0].text == "file-content"
-        assert "file_read" in result.structuredContent["tool"]
+        assert "file_read" in result.structured_content["tool"]
         server.audit_trail.arecord.assert_awaited_once()
         audit_detail = server.audit_trail.arecord.await_args.kwargs["detail"]
         assert audit_detail["denied"] is False
@@ -234,7 +234,7 @@ class TestHandleToolCall:
 
         result = await server.handle_tool_call(name="file_read", arguments={"file_path": ".env"})
 
-        assert result.isError is True
+        assert result.is_error is True
         payload = json.loads(result.content[0].text)
         assert payload["tool"] == "file_read"
         assert payload["reason"] == "blocked path"
@@ -256,7 +256,7 @@ class TestHandleToolCall:
 
         result = await server.handle_tool_call(name="shell", arguments={"command": "rm file"})
 
-        assert result.isError is True
+        assert result.is_error is True
         payload = json.loads(result.content[0].text)
         assert payload["tool"] == "shell"
 
@@ -272,7 +272,7 @@ class TestHandleToolCall:
 
         result = await server.handle_tool_call(name="shell", arguments={"command": "rm -rf /"})
 
-        assert result.isError is True
+        assert result.is_error is True
         payload = json.loads(result.content[0].text)
         assert payload["reason"] == "Permission denied"
 
@@ -288,7 +288,7 @@ class TestHandleToolCall:
 
         result = await server.handle_tool_call(name="risky", arguments={"action": "test"})
 
-        assert result.isError is True
+        assert result.is_error is True
         assert result.content[0].text == "something went wrong"
         audit_detail = server.audit_trail.arecord.await_args.kwargs["detail"]
         assert audit_detail["is_error"] is True
@@ -307,7 +307,7 @@ class TestHandleToolCall:
             name="file_read", arguments={"file_path": "secret.txt"}
         )
 
-        assert result.isError is False
+        assert result.is_error is False
         assert "sk-ant" not in result.content[0].text
         assert "[REDACTED]" in result.content[0].text
 
@@ -519,18 +519,24 @@ class TestRunStdio:
 
 
 class TestRegisteredHandlers:
+    def test_handlers_registered_on_server(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        server = _make_server(monkeypatch, tmp_path)
+        assert server.server.get_request_handler("tools/list") is not None
+        assert server.server.get_request_handler("tools/call") is not None
+
     @pytest.mark.asyncio
     async def test_list_tools_handler(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         server = _make_server(monkeypatch, tmp_path)
-        handler = server.server.request_handlers[types.ListToolsRequest]
-        result = await handler(ANY)
-        assert hasattr(result, "root")
-        assert isinstance(result.root, types.ListToolsResult)
+        result = await server._on_list_tools(ANY, None)
+        assert isinstance(result, types.ListToolsResult)
+        assert any(t.name == "file_read" for t in result.tools)
 
     @pytest.mark.asyncio
-    async def test_call_tool_handler_validate_input(
+    async def test_call_tool_handler_dispatches(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         server = _make_server(monkeypatch, tmp_path)
@@ -539,12 +545,44 @@ class TestRegisteredHandlers:
         server.audit_trail = Mock()
         server.audit_trail.arecord = AsyncMock()
 
-        handler = server.server.request_handlers[types.CallToolRequest]
-        req = types.CallToolRequest(
-            method="tools/call",
-            params={"name": "mock_tool", "arguments": {"key": "val"}},
-        )
-        result = await handler(req)
-        assert hasattr(result, "root")
-        assert isinstance(result.root, types.CallToolResult)
-        assert result.root.content[0].text == "done"
+        params = types.CallToolRequestParams(name="mock_tool", arguments={"key": "val"})
+        result = await server._on_call_tool(ANY, params)
+        assert isinstance(result, types.CallToolResult)
+        assert result.content[0].text == "done"
+
+    @pytest.mark.asyncio
+    async def test_call_tool_handler_rejects_invalid_input(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """mcp 2.x dropped validate_input; the server must still refuse bad arguments
+        before the permission engine or the tool ever runs."""
+        server = _make_server(monkeypatch, tmp_path)
+        server.permission_engine.evaluate = Mock()
+        server.registry.dispatch = AsyncMock()
+
+        params = types.CallToolRequestParams(name="file_read", arguments={})
+        result = await server._on_call_tool(ANY, params)
+        assert result.is_error is True
+        assert result.content[0].text.startswith("Input validation error:")
+        assert "file_path" in result.content[0].text
+        server.permission_engine.evaluate.assert_not_called()
+        server.registry.dispatch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_call_tool_handler_none_arguments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """mcp 2.x passes arguments=None through; it must not crash or skip validation."""
+        server = _make_server(monkeypatch, tmp_path)
+        server.registry.dispatch = AsyncMock()
+
+        params = types.CallToolRequestParams(name="file_read", arguments=None)
+        result = await server._on_call_tool(ANY, params)
+        assert result.is_error is True
+        server.registry.dispatch.assert_not_called()
+
+    def test_validate_arguments_unknown_tool_skips(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        server = _make_server(monkeypatch, tmp_path)
+        assert server.validate_arguments("no_such_tool", {"x": 1}) is None

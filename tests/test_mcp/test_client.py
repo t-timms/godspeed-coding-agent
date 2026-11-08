@@ -106,7 +106,7 @@ def _mock_tool(name: str = "search", description: str = "desc") -> MagicMock:
     t = MagicMock()
     t.name = name
     t.description = description
-    type(t).inputSchema = PropertyMock(return_value={"type": "object"})
+    type(t).input_schema = PropertyMock(return_value={"type": "object"})
     return t
 
 
@@ -256,7 +256,7 @@ class TestMCPClientConnectStdio:
         t = MagicMock()
         t.name = "bare"
         t.description = "bare tool"
-        del t.inputSchema
+        del t.input_schema
         mock_session = _make_mock_stdio_session([t])
         mock_stdlib_client = MagicMock()
         mock_stdlib_client.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
