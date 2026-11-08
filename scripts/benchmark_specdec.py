@@ -31,7 +31,7 @@ PAYLOAD = {
 
 
 def benchmark() -> dict:
-    req = urllib.request.Request(  # noqa: S310
+    req = urllib.request.Request(
         URL,
         data=json.dumps(PAYLOAD).encode(),
         headers={"Content-Type": "application/json"},
